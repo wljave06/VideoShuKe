@@ -42,6 +42,11 @@ def get_text2img_tasks():
         data = []
         for task in tasks:
             images = task.get_images()  # 获取所有图片路径
+            videos = []
+            try:
+                videos = task.get_videos()
+            except Exception:
+                videos = []
             data.append({
                 'id': task.id,
                 'prompt': task.prompt,
@@ -50,6 +55,8 @@ def get_text2img_tasks():
                 'account_id': task.account_id,
                 'images': images,  # 图片路径列表
                 'image_count': len(images),  # 图片数量
+                'videos': videos,
+                'video_count': len(videos),
                 'failure_reason': task.failure_reason,  # 失败原因类型
                 'error_message': task.error_message,  # 详细错误信息
                 'create_at': task.create_at.strftime('%Y-%m-%d %H:%M:%S'),
@@ -113,23 +120,41 @@ def create_text2img_task():
         # 如果上传了图片，保存到临时目录（带task_id前缀）供执行阶段读取
         try:
             files = request.files.getlist('images') if 'images' in request.files else []
+            print(f"接收到上传文件数量: {len(files)}")
             if files:
                 tmp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'tmp')
+                print(f"临时目录路径: {tmp_dir}")
                 os.makedirs(tmp_dir, exist_ok=True)
                 saved = 0
                 for f in files:
+                    print(f"处理文件对象: {f}")
                     if f and f.filename:
                         filename = secure_filename(f.filename)
+                        print(f"原始文件名: {f.filename}, 安全文件名: {filename}")
                         ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'jpg'
                         unique_name = f"text2img_{task.id}_{uuid.uuid4().hex}.{ext}"
                         path = os.path.join(tmp_dir, unique_name)
+                        print(f"保存文件: {filename} -> {path}")
                         try:
                             f.save(path)
                             saved += 1
+                            print(f"文件保存成功: {path}")
+                            # 验证文件是否真的保存成功
+                            if os.path.exists(path):
+                                file_size = os.path.getsize(path)
+                                print(f"文件大小: {file_size} 字节")
+                            else:
+                                print(f"警告: 文件似乎没有保存成功: {path}")
                         except Exception as se:
                             print(f"保存上传图片失败: {se}")
+                    else:
+                        print("文件对象为空或没有文件名")
                 if saved:
                     print(f"文生图任务{task.id}已保存输入图片 {saved} 张")
+                else:
+                    print(f"文生图任务{task.id}没有成功保存任何图片")
+            else:
+                print("没有接收到上传的文件")
         except Exception as e:
             print(f"处理上传图片异常（忽略继续）: {e}")
         

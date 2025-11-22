@@ -151,6 +151,33 @@ class JimengText2ImgTask(BaseModel):
             if img:
                 images.append(img)
         return images
+
+    def set_videos(self, video_urls):
+        """设置生成的视频URL列表（JSON数组）"""
+        try:
+            if video_urls:
+                try:
+                    import json as _json
+                    self.videos_json = _json.dumps(list(video_urls), ensure_ascii=False)
+                except Exception:
+                    self.videos_json = None
+            self.update_at = datetime.now()
+            self.save()
+        except Exception:
+            self.update_at = datetime.now()
+            self.save()
+
+    def get_videos(self):
+        """获取生成的视频URL列表"""
+        try:
+            import json as _json
+            if self.videos_json:
+                arr = _json.loads(self.videos_json)
+                if isinstance(arr, list):
+                    return [x for x in arr if x]
+        except Exception:
+            pass
+        return []
     
     def can_retry(self):
         """判断任务是否可以重试"""
@@ -776,3 +803,5 @@ class QingyingImage2VideoTask(BaseModel):
             self.save()
             return True
         return False
+    # 生成的视频（JSON数组，存放视频URL）
+    videos_json = TextField(null=True)

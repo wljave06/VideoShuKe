@@ -88,6 +88,41 @@ def migrate_img2img_task_table():
 # 执行迁移
 migrate_img2img_task_table()
 
+# 文生图任务表迁移：添加 videos_json 字段（存储视频URL）
+def migrate_text2img_task_table():
+    try:
+        from backend.models.models import db
+        from peewee import OperationalError
+        cursor = db.execute_sql("PRAGMA table_info(jimeng_text2img_tasks);")
+        existing_columns = [column[1] for column in cursor.fetchall()]
+        if 'videos_json' not in existing_columns:
+            try:
+                db.execute_sql("ALTER TABLE jimeng_text2img_tasks ADD COLUMN videos_json TEXT;")
+                print("成功添加 jimeng_text2img_tasks.videos_json 字段")
+            except OperationalError:
+                print("videos_json 字段已存在或添加失败")
+    except Exception as e:
+        print(f"迁移文生图表结构失败: {str(e)}")
+
+migrate_text2img_task_table()
+
+def migrate_qingying_img2video_task_table():
+    try:
+        from backend.models.models import db
+        from peewee import OperationalError
+        cursor = db.execute_sql("PRAGMA table_info(qingying_image2video_tasks);")
+        existing_columns = [column[1] for column in cursor.fetchall()]
+        if 'videos_json' not in existing_columns:
+            try:
+                db.execute_sql("ALTER TABLE qingying_image2video_tasks ADD COLUMN videos_json TEXT;")
+                print("成功添加 qingying_image2video_tasks.videos_json 字段")
+            except OperationalError:
+                print("qingying_image2video_tasks.videos_json 字段已存在或添加失败")
+    except Exception as e:
+        print(f"迁移清影图生视频表结构失败: {str(e)}")
+
+migrate_qingying_img2video_task_table()
+
 # 初始化默认配置
 ConfigUtil.init_default_configs()
 

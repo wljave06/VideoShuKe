@@ -203,7 +203,7 @@ class JimengTaskManager:
                 'thread_pool_alive': self.global_executor is not None and not self.global_executor._shutdown
             }
     
-    def get_detailed_tasks(self, status: int = None, page: int = 1, page_size: int = 1000) -> Dict:
+    def get_detailed_tasks(self, status: Optional[int] = None, page: int = 1, page_size: int = 1000) -> Dict:
         """获取详细任务列表"""
         try:
             query = JimengText2ImgTask.select()
@@ -388,16 +388,21 @@ class JimengTaskManager:
             # 执行具体的任务处理逻辑 - 这里需要用户自己实现
             result = run_async_safe(self._execute_text2img_task(task))
             
-            if result['success']:
+            if result and result.get('success'):
                 # 任务成功 - 账号使用记录已在_execute_text2img_task中处理
-                if 'images' in result and result['images']:
+                if result.get('images'):
                     task.set_images(result['images'])
+                if result.get('videos'):
+                    try:
+                        task.set_videos(result['videos'])
+                    except Exception as e:
+                        print(f"保存视频列表失败: {e}")
                 
-                if 'account_id' in result:
+                if result.get('account_id'):
                     task.account_id = result['account_id']
                     
                     # 更新账号cookies
-                    if 'cookies' in result and result['cookies']:
+                    if result.get('cookies'):
                         try:
                             from backend.core.database import db
                             with db.atomic():
@@ -414,14 +419,30 @@ class JimengTaskManager:
                 task.update_at = datetime.now()
                 task.save()
                 
+                # 清理该任务的输入图片文件，避免历史图片干扰
+                try:
+                    base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'tmp')
+                    if os.path.isdir(base_dir):
+                        for name in os.listdir(base_dir):
+                            if name.startswith(f"text2img_{task.id}_"):
+                                file_path = os.path.join(base_dir, name)
+                                try:
+                                    if os.path.isfile(file_path):
+                                        os.remove(file_path)
+                                        print(f"已清理任务 {task.id} 的输入图片: {name}")
+                                except Exception as e:
+                                    print(f"删除输入图片失败: {e}")
+                except Exception as e:
+                    print(f"清理输入图片失败: {e}")
+                
                 print(f"{self.platform_name}任务完成，ID: {task.id}")
                 with self._lock:
                     self.stats['successful'] += 1
             else:
                 # 任务失败，但仍要更新cookies - 账号使用记录已在_execute_text2img_task中处理
-                if 'account_id' in result:
+                if result and result.get('account_id'):
                     # 更新账号cookies（即使失败也要更新）
-                    if 'cookies' in result and result['cookies']:
+                    if result.get('cookies'):
                         try:
                             from backend.core.database import db
                             with db.atomic():
@@ -435,10 +456,11 @@ class JimengTaskManager:
                             print(f"更新账号cookies失败: {str(e)}")
                 
                 # 检查是否需要重试（600/900错误码）
-                error_code = result.get('code', 0)
+                error_code = result.get('code', 0) if result else 0
                 if error_code in [600, 900]:
                     # 设置失败状态和原因
-                    task.set_failure(error_code, result.get('error', '未知错误'))
+                    error_msg = result.get('error', '未知错误') if result else '未知错误'
+                    task.set_failure(error_code, error_msg)
                     
                     # 检查是否可以重试
                     if task.can_retry():
@@ -451,13 +473,14 @@ class JimengTaskManager:
                             with self._lock:
                                 self.stats['failed'] += 1
                     else:
-                        print(f"{self.platform_name}任务不可重试，ID: {task.id}，原因: {result.get('error', '未知错误')}")
+                        print(f"{self.platform_name}任务不可重试，ID: {task.id}，原因: {error_msg}")
                         with self._lock:
                             self.stats['failed'] += 1
                 elif error_code == 800:
                     # 800错误码：生成失败，账号使用记录已在执行方法中处理
-                    task.set_failure(error_code, result.get('error', '未知错误'))
-                    print(f"{self.platform_name}任务生成失败，ID: {task.id}，原因: {result.get('error', '未知错误')}")
+                    error_msg = result.get('error', '未知错误') if result else '未知错误'
+                    task.set_failure(error_code, error_msg)
+                    print(f"{self.platform_name}任务生成失败，ID: {task.id}，原因: {error_msg}")
                     with self._lock:
                         self.stats['failed'] += 1
                 else:
@@ -466,7 +489,8 @@ class JimengTaskManager:
                     task.update_at = datetime.now()
                     task.save()
                     
-                    print(f"{self.platform_name}任务失败，ID: {task.id}，原因: {result.get('error', '未知错误')}")
+                    error_msg = result.get('error', '未知错误') if result else '未知错误'
+                    print(f"{self.platform_name}任务失败，ID: {task.id}，原因: {error_msg}")
                     with self._lock:
                         self.stats['failed'] += 1
             
@@ -522,25 +546,51 @@ class JimengTaskManager:
             # 使用新的执行器
             executor = JimengText2ImageExecutor(headless=headless)
             image_path = None
+            
+            
+            
+            # 然后再检查是否有新上传的图片
+            image_path = None  # 初始化image_path变量
             try:
                 base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'tmp')
+                print(f"检查图片目录: {base_dir}")
                 if os.path.isdir(base_dir):
-                    candidates = []
-                    for name in os.listdir(base_dir):
-                        if name.startswith(f"text2img_{task.id}_"):
-                            full = os.path.join(base_dir, name)
-                            try:
-                                mtime = os.path.getmtime(full)
-                            except Exception:
-                                mtime = 0
-                            candidates.append((mtime, full))
-                    if candidates:
-                        candidates.sort(key=lambda x: x[0], reverse=True)
-                        image_path = candidates[0][1]
-                if image_path:
-                    print(f"检测到文生图任务输入图片: {image_path}")
+                    fresh_candidates = []
+                    try:
+                        import time as _t
+                        now_ts = _t.time()
+                        try:
+                            task_ts = int((getattr(task, 'update_at', None) or getattr(task, 'create_at')).timestamp())
+                        except Exception:
+                            task_ts = int(now_ts)
+                        for name in os.listdir(base_dir):
+                            print(f"检查文件: {name}")
+                            if name.startswith(f"text2img_{task.id}_"):
+                                full = os.path.join(base_dir, name)
+                                try:
+                                    if os.path.isfile(full):
+                                        mtime = os.path.getmtime(full)
+                                        is_fresh_after_task = mtime >= (task_ts - 60)
+                                        is_recent_by_now = (now_ts - mtime) <= 600
+                                        if is_fresh_after_task and is_recent_by_now:
+                                            fresh_candidates.append((mtime, full))
+                                            print(f"录用输入图片: {full}")
+                                        else:
+                                            print(f"忽略旧输入图片: {full}")
+                                    else:
+                                        print(f"路径不是文件: {full}")
+                                except Exception as e:
+                                    print(f"获取文件修改时间失败: {full}, 错误: {e}")
+                    except Exception as e:
+                        print(f"筛选输入图片失败: {e}")
+                    if fresh_candidates:
+                        fresh_candidates.sort(key=lambda x: x[0], reverse=True)
+                        image_path = fresh_candidates[0][1]
+                        print(f"检测到文生图任务新上传图片: {image_path}")
+                    else:
+                        print(f"任务 {task.id}: 本次未检测到新上传图片，按仅提示词执行")
                 else:
-                    print("未检测到文生图任务输入图片，按仅提示词执行")
+                    print(f"图片目录不存在: {base_dir}")
             except Exception as e:
                 print(f"查找输入图片失败（忽略）: {e}")
             result = await executor.run(
@@ -554,45 +604,58 @@ class JimengTaskManager:
                 image_path=image_path
             )
             
-            if result.code == 200 and result.data and len(result.data) > 0:
-                # 更新账号使用次数
+            # 修复问题2：正确判断返回数据格式
+            # result.data 的格式是 {"urls": [...], "type": "image/video"}
+            if result.code == 200 and result.data:
+                if isinstance(result.data, dict):
+                    images = result.data.get('images') or result.data.get('urls') or []
+                    # 若没有图片但有视频，尝试使用海报图作为图片以便前端展示
+                    if not images:
+                        images = result.data.get('posters') or []
+                    videos = result.data.get('videos') or []
+                    if (images and len(images) > 0) or (videos and len(videos) > 0):
+                        await self.add_task_record(available_account.id, 1)
+                        return {
+                            'success': True,
+                            'images': images,
+                            'videos': videos,
+                            'account_id': available_account.id,
+                            'cookies': result.cookies
+                        }
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    await self.add_task_record(available_account.id, 1)
+                    return {
+                        'success': True, 
+                        'images': result.data,
+                        'account_id': available_account.id,
+                        'cookies': result.cookies
+                    }
+            
+            # 如果没有有效数据，返回失败
+            error_msg = result.message or "即梦平台图片生成失败"
+            error_code = result.code
+            
+            # 如果是700（任务ID等待超时）或800（生成失败），需要更新账号使用记录
+            if error_code in [700, 800]:
+                print(f"错误码 {error_code}，更新账号使用情况")
                 await self.add_task_record(available_account.id, 1)  # 1=文生图
-                
-                return {
-                    'success': True, 
-                    'images': result.data,
-                    'account_id': available_account.id,
-                    'cookies': result.cookies
-                }
-            else:
-                error_msg = result.message or "即梦平台图片生成失败"
-                error_code = result.code
-                
-                # 如果是700（任务ID等待超时）或800（生成失败），需要更新账号使用记录
-                if error_code in [700, 800]:
-                    print(f"错误码 {error_code}，更新账号使用情况")
-                    await self.add_task_record(available_account.id, 1)  # 1=文生图
-                
-                return {
-                    'success': False, 
-                    'error': error_msg, 
-                    'account_id': available_account.id, 
-                    'should_create_empty_task': error_code in [700, 800], 
-                    'code': error_code,
-                    'cookies': result.cookies
-                }
+            
+            return {
+                'success': False, 
+                'error': error_msg, 
+                'account_id': available_account.id, 
+                'should_create_empty_task': error_code in [700, 800], 
+                'code': error_code,
+                'cookies': result.cookies
+            }
                 
         except Exception as e:
             print(f"即梦任务执行异常: {str(e)}")
             return {'success': False, 'error': f'任务执行异常: {str(e)}'}
         finally:
             # 确保浏览器关闭
-            if client:
-                try:
-                    await client.close()
-                except Exception as e:
-                    print(f"关闭浏览器异常: {str(e)}")
-                    pass
+            # client 未被使用，删除相关代码
+            pass
     
     def _get_available_account(self, task_type='text2img'):
         """

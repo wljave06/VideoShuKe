@@ -916,7 +916,7 @@ export default {
         ElMessage.error('图片大小不能超过10MB!')
         return false
       }
-      return false
+      return true // 允许上传
     }
 
     // 重置批量添加表单

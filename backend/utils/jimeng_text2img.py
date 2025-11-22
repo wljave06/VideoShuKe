@@ -1,4 +1,5 @@
-"""
+# type: ignore
+"""  
 即梦平台自动化模块 - 文本生成图片
 based on BaseTaskExecutor refactoring version
 """
@@ -17,6 +18,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         super().__init__(headless)
         self.task_id = None
         self.image_urls = []
+        self.video_urls = []
         self.generation_completed = False
         self.current_tool_type = None  # 记录当前选择的工具类型
         self.generation_started = False
@@ -32,7 +34,64 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         self.did_soft_refresh = False
         self.send_via_enter = False
         self.pre_perf_names = set()
-    
+
+    async def close_all_modals(self, max_rounds: int = 8) -> int:
+        closed = 0
+        try:
+            for _ in range(max_rounds):
+                did = False
+                try:
+                    close_icon = self.page.locator('span.lv-modal-close-icon')
+                    if await close_icon.count() > 0 and await close_icon.first.is_visible():
+                        await close_icon.first.click()
+                        await asyncio.sleep(0.2)
+                        closed += 1
+                        did = True
+                except Exception:
+                    pass
+                try:
+                    alt_close = self.page.locator('div[class*="close-button-"]')
+                    if await alt_close.count() > 0 and await alt_close.first.is_visible():
+                        await alt_close.first.click()
+                        await asyncio.sleep(0.2)
+                        closed += 1
+                        did = True
+                except Exception:
+                    pass
+                try:
+                    got_it_btn = self.page.locator('button:has-text("Got it")')
+                    if await got_it_btn.count() > 0 and await got_it_btn.first.is_visible():
+                        await got_it_btn.first.click()
+                        await asyncio.sleep(0.2)
+                        closed += 1
+                        did = True
+                except Exception:
+                    pass
+                try:
+                    ok_btn = self.page.locator('button:has-text("OK"), button:has-text("Close"), button:has-text("关闭"), button:has-text("确定")')
+                    if await ok_btn.count() > 0 and await ok_btn.first.is_visible():
+                        await ok_btn.first.click()
+                        await asyncio.sleep(0.2)
+                        closed += 1
+                        did = True
+                except Exception:
+                    pass
+                if not did:
+                    try:
+                        modal_root = self.page.locator('[class*="lv-modal"], [class*="modal"], [role="dialog"], [class*="overlay"]')
+                        if await modal_root.count() > 0:
+                            await self.page.keyboard.press('Escape')
+                            await asyncio.sleep(0.2)
+                            closed += 1
+                            did = True
+                    except Exception:
+                        pass
+                if not did:
+                    break
+        except Exception:
+            pass
+        return closed
+
     async def handle_cookies(self, cookies: str):
         """处理cookies字符串格式"""
         try:
@@ -239,6 +298,26 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
     async def navigate_to_generation_page(self) -> TaskResult:
         """跳转到AI工具生成页面"""
         try:
+            try:
+                light_mode_popup_selector = 'div.lv-modal-content:has-text("Dreamina now supports Light Mode")'
+                light = await self.page.query_selector(light_mode_popup_selector)
+                if light:
+                    try:
+                        got = await self.page.query_selector('button.lv-btn.lv-btn-primary.lv-btn-size-default.lv-btn-shape-square:has-text("Got it")')
+                        if got:
+                            await got.click()
+                            await asyncio.sleep(0.2)
+                            self.logger.info("已处理Light Mode提示弹窗")
+                        else:
+                            got2 = await self.page.query_selector('button:has-text("Got it")')
+                            if got2:
+                                await got2.click()
+                                await asyncio.sleep(0.2)
+                                self.logger.info("已处理Light Mode提示弹窗(备用)")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self.logger.info("正在跳转到AI工具生成页面")
             await self.page.goto('https://dreamina.capcut.com/ai-tool/generate')
             await self.page.wait_for_load_state('networkidle', timeout=60000)
@@ -292,7 +371,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                         await asyncio.sleep(2)
                     else:
                         # 如果没有关闭按钮，点击Copy link按钮
-                        copy_link_button = await self.page.query_selector('button.lv-btn.lv-btn-primary.lv-btn-size-default.lv-btn-shape-square.app-download-button-gIF_ODD')
+                        copy_link_button = await self.page.query_selector('button.lv-btn.lv-btn-primary.lv-btn-size-default.lv-btn-shape-square.app-download-button-gIF_OD')
                         if copy_link_button:
                             await copy_link_button.click()
                             self.logger.info("已点击Copy link按钮")
@@ -397,12 +476,46 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         try:
             self.logger.info("上传图片", image_path=image_path)
             
+            # 先清除之前上传的文件（解决问题2：重复上传显示第一次的图片）
+            try:
+                clear_buttons = await self.page.query_selector_all('button[aria-label*="清除"], button[aria-label*="clear"], button[class*="clear"]')
+                for btn in clear_buttons:
+                    try:
+                        if await btn.is_visible():
+                            await btn.click()
+                            await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.logger.debug(f"清除旧图片失败: {e}")
+            
             # 优先使用隐藏的 file input 直接设置文件，不要求可见
             selectors = [
                 'input[type="file"][accept*="image"]',
                 'input[type="file"]',
                 'input[class*="file-input"]',
             ]
+            # 尝试打开上传面板/触发器
+            triggers = [
+                'button:has-text("Attach")',
+                'button:has-text("Upload")',
+                'button:has-text("Add image")',
+                '[aria-label*="upload"]',
+                '[class*="upload"]',
+                '[class*="attach"]',
+                '[class*="add-image"]',
+            ]
+            try:
+                for t in triggers:
+                    try:
+                        loc = self.page.locator(t)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            await loc.first.click()
+                            await asyncio.sleep(0.2)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             set_ok = False
             for sel in selectors:
                 try:
@@ -428,11 +541,87 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
             if not set_ok:
                 raise Exception("未找到可用的文件上传控件或设置文件失败")
             
-            # 等待上传完成
+            # 等待上传完成（解决问题1：等待上传处理完成，避免按钮状态异常）
             await asyncio.sleep(3)
             
-            self.logger.info("图片上传成功")
-            return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="图片上传成功")
+            # 等待上传进度消失，确保上传完全完成
+            try:
+                await self.page.wait_for_function(
+                    '''() => {
+                        const progress = document.querySelector('[class*="progress"], [class*="uploading"], [class*="loading"]');
+                        return !progress || progress.style.display === 'none';
+                    }''',
+                    timeout=10000
+                )
+            except Exception as e:
+                self.logger.debug(f"等待上传进度消失超时: {e}")
+            
+            await asyncio.sleep(1)  # 额外等待确保UI状态更新
+            
+            # 验证预览是否已附加到当前输入
+            try:
+                count_preview = await self.page.evaluate('''() => {
+                    const within = document.querySelector('[data-index="0"]') || document;
+                    const imgs = within.querySelectorAll('div[class*="user-reference-files"], div[class*="reference-group"], div[class*="reference-"], img[class*="reference-"]');
+                    return imgs ? imgs.length : 0;
+                }''')
+                self.logger.info("验证上传预览图数量", count=count_preview)
+            except Exception:
+                pass
+            
+            # 若未检测到预览，尝试一次补救：点击“Add image/Attach”并再次设置文件
+            if not count_preview or int(count_preview) == 0:
+                self.logger.warning("未检测到输入区预览，尝试补救附加")
+                try:
+                    for t in [
+                        'button:has-text("Add image")',
+                        'button:has-text("Attach")',
+                        '[aria-label*="upload"]',
+                        '[class*="upload"]'
+                    ]:
+                        try:
+                            loc = self.page.locator(t)
+                            if await loc.count() > 0 and await loc.first.is_visible():
+                                await loc.first.click()
+                                await asyncio.sleep(0.3)
+                        except Exception:
+                            pass
+                    # 再次尝试设置文件
+                    for sel in [
+                        'input[type="file"][accept*="image"]',
+                        'input[type="file"]'
+                    ]:
+                        try:
+                            await self.page.wait_for_selector(sel, state='attached', timeout=3000)
+                            await self.page.set_input_files(sel, image_path)
+                            await asyncio.sleep(1)
+                            break
+                        except Exception:
+                            pass
+                    # 重新验证
+                    try:
+                        count_preview = await self.page.evaluate('''() => {
+                            const within = document.querySelector('[data-index="0"]') || document;
+                            const imgs = within.querySelectorAll('div[class*="user-reference-files"], div[class*="reference-group"], div[class*="reference-"], img[class*="reference-"]');
+                            return imgs ? imgs.length : 0;
+                        }''')
+                        self.logger.info("补救后预览图数量", count=count_preview)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            
+            # 根据结果决定是否通过回车发送
+            try:
+                attached = bool(count_preview and int(count_preview) > 0)
+            except Exception:
+                attached = False
+            self.send_via_enter = attached
+            if attached:
+                self.logger.info("图片上传并已附加到输入区")
+            else:
+                self.logger.warning("图片上传成功但未附加到输入区，将按纯提示词继续")
+            return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="图片上传流程结束")
             
         except Exception as e:
             self.logger.error("图片上传失败", error=str(e))
@@ -461,7 +650,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 
                 for element in option_elements:
                     text_content = await element.text_content()
-                    if model in text_content or text_content.strip() == model:
+                    if model in (text_content or "") or (text_content or "").strip() == model:
                         await element.click()
                         model_option_found = True
                         self.logger.info("已选择模型", model=model)
@@ -522,7 +711,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 error_details={"error": str(e)}
             )
     
-    async def select_aspect_ratio(self, aspect_ratio: str, model: str = None) -> TaskResult:
+    async def select_aspect_ratio(self, aspect_ratio: str, model: Optional[str] = None) -> TaskResult:
         """选择比例"""
         try:
             self.logger.info("选择比例", aspect_ratio=aspect_ratio, model=model)
@@ -580,7 +769,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                     button_element = await self.page.query_selector('button.lv-btn.lv-btn-secondary.lv-btn-size-default.lv-btn-shape-square:has([class*="button-text-"])')
                     if button_element:
                         button_text = await button_element.text_content()
-                        if aspect_ratio in button_text:
+                        if aspect_ratio in (button_text or ""):
                             self.logger.info("比例选择成功", aspect_ratio=aspect_ratio)
                             ratio_selected = True
                             break
@@ -752,13 +941,13 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                         element = await self.page.query_selector(selector)
                         if element:
                             element_text = await element.text_content()
-                            if quality == "1K" and "Standard (1K)" in element_text:
+                            if quality == "1K" and "Standard (1K)" in (element_text or ""):
                                 self.logger.info("已经是 Standard (1K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
-                            elif quality == "2K" and "High (2K)" in element_text:
+                            elif quality == "2K" and "High (2K)" in (element_text or ""):
                                 self.logger.info("已经是 High (2K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
-                            elif quality == "4K" and "Ultra (4K)" in element_text:
+                            elif quality == "4K" and "Ultra (4K)" in (element_text or ""):
                                 self.logger.info("已经是 Ultra (4K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
                     except:
@@ -772,13 +961,13 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                         element = await self.page.query_selector(selector)
                         if element:
                             element_text = await element.text_content()
-                            if quality == "1K" and "Standard (1K)" in element_text:
+                            if quality == "1K" and "Standard (1K)" in (element_text or ""):
                                 self.logger.info("已经是 Standard (1K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
-                            elif quality == "2K" and "High (2K)" in element_text:
+                            elif quality == "2K" and "High (2K)" in (element_text or ""):
                                 self.logger.info("已经是 High (2K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
-                            elif quality == "4K" and "Ultra (4K)" in element_text:
+                            elif quality == "4K" and "Ultra (4K)" in (element_text or ""):
                                 self.logger.info("已经是 Ultra (4K) 质量，无需更改")
                                 return TaskResult(code=ErrorCode.SUCCESS.value, data=None, message="质量已经是所需选项")
                     except:
@@ -792,7 +981,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                     if quality_element:
                         element_text = await quality_element.text_content()
                         # 如果元素包含当前质量，点击它可能会展开选项
-                        if "Standard" in element_text or "High" in element_text or "Ultra" in element_text:
+                        if "Standard" in (element_text or "") or "High" in (element_text or "") or "Ultra" in (element_text or ""):
                             await quality_element.click()
                             await asyncio.sleep(1)
                             
@@ -1015,8 +1204,10 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                             for asset in asset_list:
                                 if "id" in asset and asset.get("id") == self.task_id:
                                     target_asset = asset
+                                    self.logger.info("✅ 精准匹配到当前任务的资源", task_id=self.task_id)
                                     break
                         if not target_asset:
+                            self.logger.warning("⚠️ 未能精准匹配,使用最新完成的资源")
                             finished_assets = [a for a in asset_list if a.get("image", {}).get("finish_time", 0)]
                             finished_assets.sort(key=lambda x: x.get("image", {}).get("finish_time", 0), reverse=True)
                             if finished_assets:
@@ -1036,7 +1227,18 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                                     except Exception:
                                         pass
                                 if self.image_urls:
-                                    self.logger.info("图片生成完成", count=len(self.image_urls))
+                                    # 关键: 如果是通过task_id精准匹配到的,不需要再过滤!
+                                    if self.task_id:
+                                        self.logger.info("✅ 通过task_id精准匹配,图片生成完成", count=len(self.image_urls))
+                                    else:
+                                        # 如果没有task_id,才使用快照过滤(降级方案)
+                                        new_urls = [url for url in self.image_urls if url not in self.pre_gen_image_urls]
+                                        if new_urls:
+                                            self.image_urls = new_urls
+                                            self.logger.info("⚠️ 无task_id,通过快照过滤后生成完成", count=len(self.image_urls))
+                                        else:
+                                            self.logger.warning("⚠️ 过滤后无新图片,可能是历史数据")
+                                    
                                     for i, url in enumerate(self.image_urls):
                                         self.logger.info(f"图片{i+1} URL", url=url)
                                     self.generation_completed = True
@@ -1055,6 +1257,26 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
             try:
                 headers = getattr(response, "headers", {})
                 content_type = headers.get("content-type") if isinstance(headers, dict) else None
+                # 捕获视频请求
+                try:
+                    u = response.url
+                    ct = (content_type or "").lower() if isinstance(content_type, str) else ""
+                    lu = u.lower()
+                    is_video = (
+                        (ct and "video" in ct) or (
+                            (lu.startswith("http://") or lu.startswith("https://")) and
+                            (not lu.startswith("blob:")) and
+                            (lu.endswith(".mp4") or ("mime_type=video_" in lu) or ("video_mp4" in lu)) and
+                            (("capcut.com" in lu) or ("tos-alisg-ve" in lu)) and
+                            ("record-loading-animation" not in lu)
+                        )
+                    )
+                    if is_video:
+                        if u not in self.video_urls:
+                            self.video_urls.append(u)
+                            self.logger.info("📡 捕获到视频请求", url=u)
+                except Exception:
+                    pass
                 if content_type and "application/json" in content_type:
                     try:
                         data_any = await response.json()
@@ -1117,7 +1339,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                                 if (!sendBtn) return false;
                                 const dis = sendBtn.classList.contains('lv-btn-disabled') || sendBtn.getAttribute('disabled') !== null;
                                 return !!dis;
-                            }''', timeout=2000
+                            }''', timeout=5000  # 增加超时时间，解决问题1
                         )
                     except Exception:
                         self.logger.info("回车发送未生效，回退为按钮点击")
@@ -1179,11 +1401,923 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 error_details={"error": str(e)}
             )
 
-    async def extract_fullsize_images_from_dom(self) -> List[str]:
-        """专门提取1080:1080大图的版本"""
+    async def find_task_id_elements(self, task_id: str = None) -> List[str]:
+        """查找页面上所有包含task_id的元素，用于调试定位问题"""
+        try:
+            target_task_id = task_id or self.task_id
+            if not target_task_id:
+                return []
+            
+            # 查找所有包含task_id的元素
+            elements_info = await self.page.evaluate(f'''() => {{
+                const taskId = '{target_task_id}';
+                const results = [];
+                
+                // 查找所有元素
+                const allElements = Array.from(document.querySelectorAll('*'));
+                for (const el of allElements) {{
+                    // 检查属性
+                    const attrs = el.attributes;
+                    for (let i = 0; i < attrs.length; i++) {{
+                        const attr = attrs[i];
+                        if (attr.value.includes(taskId)) {{
+                            results.push({{
+                                tag: el.tagName,
+                                attrName: attr.name,
+                                attrValue: attr.value.substring(0, 100),
+                                text: (el.textContent || '').substring(0, 50)
+                            }});
+                        }}
+                    }}
+                    
+                    // 检查文本内容
+                    const text = el.textContent || '';
+                    if (text.includes(taskId) && text.length < 200) {{
+                        results.push({{
+                            tag: el.tagName,
+                            attrName: 'textContent',
+                            attrValue: text.substring(0, 100),
+                            text: text.substring(0, 50)
+                        }});
+                    }}
+                }}
+                
+                return results.slice(0, 20); // 限制返回数量
+            }}''')
+            
+            return elements_info or []
+        except Exception as e:
+            self.logger.debug(f"查找task_id元素失败: {e}")
+            return []
+
+    async def extract_images_by_task_id(self, task_id: str = None) -> List[str]:
+        """根据task_id精准提取当前任务生成的图片"""
+        try:
+            # 使用当前对象的task_id或传入的task_id
+            target_task_id = task_id or self.task_id
+            if not target_task_id:
+                self.logger.warning("⚠️ 未提供task_id，无法精准定位")
+                return []
+            
+            self.logger.info(f"🎯 使用task_id精准定位: {target_task_id}")
+            
+            # 首先查找所有包含task_id的元素（用于调试）
+            elements_info = await self.find_task_id_elements(target_task_id)
+            if elements_info:
+                self.logger.info(f"🔍 找到 {len(elements_info)} 个包含task_id的元素:")
+                for i, elem in enumerate(elements_info[:5]):  # 只显示前5个
+                    self.logger.info(f"  元素{i+1}: <{elem.get('tag', 'N/A')}> {elem.get('attrName', 'N/A')}='{elem.get('attrValue', 'N/A')}'")
+            
+            # 通过task_id在DOM中查找对应的容器
+            result = await self.page.evaluate(f'''() => {{
+                const taskId = '{target_task_id}';
+                const results = new Set();
+                
+                // 辅助函数：从URL中提取分辨率
+                const getResolution = (url) => {{
+                    const match = /aigc_resize:(\\d+):(\\d+)/.exec(url);
+                    if (match) {{
+                        return parseInt(match[1]) * parseInt(match[2]);
+                    }}
+                    return 0;
+                }};
+                
+                // 调试信息：输出所有可能相关的元素
+                console.log('🔍 查找task_id相关元素:', taskId);
+                
+                // 方法1: 查找包含task_id的容器（优先查找data-id属性）
+                let taskContainer = null;
+                
+                // 优先通过data-id属性查找
+                const dataIdElements = Array.from(document.querySelectorAll(`[data-id*="${{taskId}}"]`));
+                console.log('📊 data-id匹配元素数量:', dataIdElements.length);
+                if (dataIdElements.length > 0) {{
+                    taskContainer = dataIdElements[0];
+                    console.log('✅ 找到data-id容器:', taskContainer);
+                }} else {{
+                    // 如果没找到，尝试其他属性
+                    const allDivs = Array.from(document.querySelectorAll('div'));
+                    console.log('📊 总div元素数量:', allDivs.length);
+                    for (const div of allDivs) {{
+                        // 检查各种可能包含task_id的属性
+                        const dataTaskId = div.getAttribute('data-task-id') || div.getAttribute('data-request-id') || 
+                                          div.getAttribute('id');
+                        if (dataTaskId && dataTaskId.includes(taskId)) {{
+                            taskContainer = div;
+                            console.log('✅ 通过其他属性找到容器:', dataTaskId);
+                            break;
+                        }}
+                        // 检查class中是否包含task_id
+                        const className = div.className || '';
+                        if (className.includes(taskId)) {{
+                            taskContainer = div;
+                            console.log('✅ 通过class找到容器:', className);
+                            break;
+                        }}
+                    }}
+                }}
+                
+                // 方法2: 如果方法1没找到，尝试通过ID查找（task_id可能是ID的一部分）
+                if (!taskContainer) {{
+                    console.log('🔄 尝试通过ID查找容器');
+                    const idElements = Array.from(document.querySelectorAll(`[id*="${{taskId}}"]`));
+                    console.log('📊 ID匹配元素数量:', idElements.length);
+                    if (idElements.length > 0) {{
+                        taskContainer = idElements[0];
+                        console.log('✅ 通过ID找到容器:', taskContainer.id);
+                    }}
+                }}
+                
+                // 方法3: 如果还没找到，尝试通过文本内容查找（task_id可能在文本中）
+                if (!taskContainer) {{
+                    console.log('🔄 尝试通过文本内容查找容器');
+                    const textElements = Array.from(document.querySelectorAll('*'));
+                    for (const el of textElements) {{
+                        const text = el.textContent || '';
+                        if (text.includes(taskId) && text.length < 200) {{
+                            taskContainer = el;
+                            console.log('✅ 通过文本找到容器:', text.substring(0, 50));
+                            break;
+                        }}
+                    }}
+                }}
+                
+                // 方法4: 如果还没找到，尝试通过父级容器查找
+                if (!taskContainer) {{
+                    console.log('🔄 尝试通过父级容器查找');
+                    // 查找所有包含task_id的元素，然后向上查找父级容器
+                    const allElements = Array.from(document.querySelectorAll('*'));
+                    for (const el of allElements) {{
+                        const attrs = el.attributes;
+                        let found = false;
+                        for (let i = 0; i < attrs.length; i++) {{
+                            const attr = attrs[i];
+                            if (attr.value.includes(taskId)) {{
+                                // 找到包含task_id的元素，向上查找父级容器
+                                let parent = el.parentElement;
+                                while (parent && parent !== document.body) {{
+                                    if (parent.className && (parent.className.includes('item-') || parent.className.includes('container-') || parent.className.includes('record-'))) {{
+                                        taskContainer = parent;
+                                        console.log('✅ 通过父级容器找到:', parent.className);
+                                        found = true;
+                                        break;
+                                    }}
+                                    parent = parent.parentElement;
+                                }}
+                                if (found) break;
+                            }}
+                        }}
+                        if (found) break;
+                    }}
+                }}
+                
+                // 方法5: 尝试通过task_id的部分匹配查找（可能task_id被截断或变化了）
+                if (!taskContainer) {{
+                    console.log('🔄 尝试通过task_id部分匹配查找');
+                    // 使用task_id的前几位进行模糊匹配
+                    const taskIdPrefix = taskId.substring(0, Math.min(8, taskId.length));
+                    const prefixElements = Array.from(document.querySelectorAll(`[data-id*="${{taskIdPrefix}}"], [id*="${{taskIdPrefix}}"]`));
+                    console.log('📊 前缀匹配元素数量:', prefixElements.length);
+                    if (prefixElements.length > 0) {{
+                        taskContainer = prefixElements[0];
+                        console.log('✅ 通过前缀找到容器:', taskContainer.tagName, taskContainer.id || taskContainer.className);
+                    }}
+                }}
+                
+                // 方法6: 如果还没找到，尝试查找所有包含"ai-generated"或"record-card"的图片容器
+                if (!taskContainer) {{
+                    console.log('🔄 尝试查找AI生成图片容器');
+                    // 查找最新的AI生成图片容器
+                    const aiContainers = Array.from(document.querySelectorAll('div[class*="item-"], div[class*="record-"], div[class*="container-"]'));
+                    console.log('📊 AI相关容器数量:', aiContainers.length);
+                    if (aiContainers.length > 0) {{
+                        // 从后往前找，通常是最新生成的在后面
+                        for (let i = aiContainers.length - 1; i >= 0; i--) {{
+                            const container = aiContainers[i];
+                            const imgs = container.querySelectorAll('img[data-apm-action*="ai-generated"], img[data-apm-action*="record-card"]');
+                            if (imgs.length > 0) {{
+                                taskContainer = container;
+                                console.log('✅ 通过AI图片找到容器:', container.className);
+                                break;
+                            }}
+                        }}
+                    }}
+                }}
+                
+                // 如果找到了对应的容器，从中提取图片
+                if (taskContainer) {{
+                    console.log('📦 容器内查找图片...');
+                    // 查找容器内的所有图片
+                    const imgs = Array.from(taskContainer.querySelectorAll('img[data-apm-action*="ai-generated"], img[data-apm-action*="record-card"], img[class*="image-"], img[src*="aigc_resize"]'));
+                    console.log('📊 容器内图片数量:', imgs.length);
+                    for (const img of imgs) {{
+                        let src = img.src || '';
+                        const srcset = img.getAttribute('srcset') || '';
+                        
+                        // 优先使用srcset中最高分辨率版本
+                        if (srcset) {{
+                            try {{
+                                const candidates = srcset.split(',')
+                                    .map(s => s.trim().split(' ')[0])
+                                    .filter(Boolean)
+                                    .filter(url => url.includes('aigc_resize:'));
+                                if (candidates.length) {{
+                                    let bestUrl = candidates[0];
+                                    let maxRes = getResolution(bestUrl);
+                                    for (const url of candidates) {{
+                                        const res = getResolution(url);
+                                        if (res > maxRes) {{
+                                            maxRes = res;
+                                            bestUrl = url;
+                                        }}
+                                    }}
+                                    src = bestUrl;
+                                }}
+                            }} catch {{}}
+                        }}
+                        
+                        // 添加包含aigc_resize的图片
+                        if (src.includes('aigc_resize:') && (img.naturalWidth || 0) >= 256) {{
+                            console.log('🖼️ 找到图片:', src);
+                            results.add(src);
+                        }} else {{
+                            console.log('🗑️ 过滤图片:', src, '宽度:', img.naturalWidth);
+                        }}
+                    }}
+                }} else {{
+                    console.log('❌ 未找到task_id对应的容器');
+                }}
+                
+                // 方法7: 如果没找到容器，尝试直接查找页面上所有的AI生成图片
+                if (results.size === 0) {{
+                    console.log('🔄 尝试直接查找所有AI生成图片');
+                    const allImgs = Array.from(document.querySelectorAll('img[data-apm-action*="ai-generated"], img[data-apm-action*="record-card"]'));
+                    console.log('📊 所有AI图片数量:', allImgs.length);
+                    for (const img of allImgs) {{
+                        let src = img.src || '';
+                        const srcset = img.getAttribute('srcset') || '';
+                        
+                        // 优先使用srcset中最高分辨率版本
+                        if (srcset) {{
+                            try {{
+                                const candidates = srcset.split(',')
+                                    .map(s => s.trim().split(' ')[0])
+                                    .filter(Boolean)
+                                    .filter(url => url.includes('aigc_resize:'));
+                                if (candidates.length) {{
+                                    let bestUrl = candidates[0];
+                                    let maxRes = getResolution(bestUrl);
+                                    for (const url of candidates) {{
+                                        const res = getResolution(url);
+                                        if (res > maxRes) {{
+                                            maxRes = res;
+                                            bestUrl = url;
+                                        }}
+                                    }}
+                                    src = bestUrl;
+                                }}
+                            }} catch {{}}
+                        }}
+                        
+                        // 添加包含aigc_resize的图片
+                        if (src.includes('aigc_resize:') && (img.naturalWidth || 0) >= 256) {{
+                            console.log('🖼️ 直接找到图片:', src);
+                            results.add(src);
+                        }} else {{
+                            console.log('🗑️ 直接过滤图片:', src, '宽度:', img.naturalWidth);
+                        }}
+                    }}
+                }}
+                
+                // 方法8: 如果还是没找到，尝试查找最新的nodes-container（通常是最后一个）
+                if (results.size === 0) {{
+                    console.log('🔄 尝试降级方案：查找nodes-container');
+                    const containers = Array.from(document.querySelectorAll('div[class*="nodes-container-"], div[class*="image-nodes-container-"]'));
+                    console.log('📊 nodes-container数量:', containers.length);
+                    if (containers.length > 0) {{
+                        // 取最后一个容器（通常是最新生成的）
+                        const lastContainer = containers[containers.length - 1];
+                        const imgs = Array.from(lastContainer.querySelectorAll('img[data-apm-action*="ai-generated"], img[data-apm-action*="record-card"], img[class*="image-"], img[src*="aigc_resize"]'));
+                        console.log('📊 最后容器内图片数量:', imgs.length);
+                        for (const img of imgs) {{
+                            let src = img.src || '';
+                            const srcset = img.getAttribute('srcset') || '';
+                            
+                            if (srcset) {{
+                                try {{
+                                    const candidates = srcset.split(',')
+                                        .map(s => s.trim().split(' ')[0])
+                                        .filter(Boolean)
+                                        .filter(url => url.includes('aigc_resize:'));
+                                    if (candidates.length) {{
+                                        let bestUrl = candidates[0];
+                                        let maxRes = getResolution(bestUrl);
+                                        for (const url of candidates) {{
+                                            const res = getResolution(url);
+                                            if (res > maxRes) {{
+                                                maxRes = res;
+                                                bestUrl = url;
+                                            }}
+                                        }}
+                                        src = bestUrl;
+                                    }}
+                                }} catch {{}}
+                            }}
+                            
+                            if (src.includes('aigc_resize:') && (img.naturalWidth || 0) >= 256) {{
+                                console.log('🖼️ 降级方案找到图片:', src);
+                                results.add(src);
+                            }} else {{
+                                console.log('🗑️ 降级方案过滤图片:', src, '宽度:', img.naturalWidth);
+                            }}
+                        }}
+                    }}
+                }}
+                
+                console.log('🏁 最终结果数量:', results.size);
+                return {{
+                    urls: Array.from(results),
+                    debugInfo: {{
+                        taskId: taskId,
+                        containerFound: !!taskContainer,
+                        containerType: taskContainer ? taskContainer.tagName : null,
+                        containerId: taskContainer ? taskContainer.id : null,
+                        containerDataId: taskContainer ? taskContainer.getAttribute('data-id') : null,
+                        containerClass: taskContainer ? taskContainer.className : null
+                    }}
+                }};
+            }}''')
+            
+            urls = result.get('urls', []) if isinstance(result, dict) else (result or [])
+            debug_info = result.get('debugInfo', {}) if isinstance(result, dict) else {}
+            
+            # 输出调试信息
+            if debug_info:
+                self.logger.info(f"🔍 调试信息 - 容器找到: {debug_info.get('containerFound', False)}")
+                if debug_info.get('containerFound'):
+                    self.logger.info(f"  标签: {debug_info.get('containerType', 'N/A')}")
+                    self.logger.info(f"  ID: {debug_info.get('containerId', 'N/A')}")
+                    self.logger.info(f"  Data-ID: {debug_info.get('containerDataId', 'N/A')}")
+                    self.logger.info(f"  Class: {debug_info.get('containerClass', 'N/A')}")
+            
+            if urls:
+                self.logger.info(f"✅ 通过task_id定位找到 {len(urls)} 个图片")
+                # 按分辨率排序
+                def get_resolution(url):
+                    import re
+                    match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                    if match:
+                        return int(match.group(1)) * int(match.group(2))
+                    return 0
+                urls.sort(key=get_resolution, reverse=True)
+                return urls
+            else:
+                self.logger.warning(f"⚠️ 未通过task_id定位到图片")
+                # 输出更多调试信息
+                self.logger.info(f"  搜索的task_id: {target_task_id}")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"根据task_id提取图片失败: {e}")
+            return []
+
+    async def extract_latest_generated_images(self) -> List[str]:
+        """提取最新生成的图片（不依赖task_id）"""
+        try:
+            self.logger.info("🔄 使用最新图片提取方法")
+            
+            # 直接查找页面上所有AI生成的图片
+            urls = await self.page.evaluate(r'''() => {
+                const results = new Set();
+                
+                // 辅助函数：从URL中提取分辨率
+                const getResolution = (url) => {
+                    const match = /aigc_resize:(\d+):(\d+)/.exec(url);
+                    if (match) {
+                        return parseInt(match[1]) * parseInt(match[2]);
+                    }
+                    return 0;
+                };
+                
+                console.log('🔍 查找所有AI生成图片...');
+                
+                // 优先方法: 查找data-index="0"下的图片（当前生成的内容）
+                try {
+                    const currentIndexContainer = document.querySelector('[data-index="0"]');
+                    if (currentIndexContainer) {
+                        console.log('🎯 找到data-index="0"容器，优先提取其中的图片');
+                        const containerImgs = Array.from(currentIndexContainer.querySelectorAll(
+                            'img[data-apm-action*="ai-generated"], ' +
+                            'img[data-apm-action*="record-card"], ' +
+                            'img[src*="aigc_resize"], ' +
+                            'img[class*="image-card"], ' +
+                            'img[data-loaded="true"]'
+                        ));
+                        console.log('📊 data-index="0"容器内图片数量:', containerImgs.length);
+                        
+                        // 只处理当前容器内的图片，避免处理历史图片
+                        for (const img of containerImgs) {
+                            let src = img.src || '';
+                            const srcset = img.getAttribute('srcset') || '';
+                            
+                            // 优先使用srcset中最高分辨率版本
+                            if (srcset) {
+                                try {
+                                    const candidates = srcset.split(',')
+                                        .map(s => s.trim().split(' ')[0])
+                                        .filter(Boolean)
+                                        .filter(url => url.includes('aigc_resize:') || url.includes('capcutapi') || url.includes('tos'));
+                                    if (candidates.length) {
+                                        let bestUrl = candidates[0];
+                                        let maxRes = getResolution(bestUrl);
+                                        for (const url of candidates) {
+                                            const res = getResolution(url);
+                                            if (res > maxRes) {
+                                                maxRes = res;
+                                                bestUrl = url;
+                                            }
+                                        }
+                                        src = bestUrl;
+                                    }
+                                } catch {}
+                            }
+                            
+                            // 添加包含aigc_resize的图片（至少128x128）
+                            if ((src.includes('aigc_resize:') || src.includes('capcutapi') || src.includes('tos')) && (img.naturalWidth || 0) >= 128) {
+                                console.log('🖼️ data-index="0"容器中找到图片:', src, '尺寸:', img.naturalWidth, 'x', img.naturalHeight);
+                                results.add(src);
+                            } else {
+                                console.log('🗑️ data-index="0"容器中过滤图片:', src, '宽度:', img.naturalWidth);
+                            }
+                        }
+                        
+                        // 注意：不直接返回，仍然需要后续处理获取超清大图
+                        if (results.size > 0) {
+                            console.log('✅ 从data-index="0"容器中成功提取到图片，继续处理获取超清大图');
+                            // 如果在data-index="0"中找到了图片，直接返回，不再执行其他查找逻辑
+                            return Array.from(results);
+                        }
+                    } else {
+                        console.log('⚠️ 未找到data-index="0"容器');
+                    }
+                } catch (e) {
+                    console.log('⚠️ 提取data-index="0"容器图片时出错:', e);
+                }
+                
+                // 方法1: 查找所有包含AI生成标记的图片（仅限当前生成的容器）
+                // 通过查找最新的nodes-container来限定范围
+                try {
+                    const nodesContainers = Array.from(document.querySelectorAll(
+                        'div[class*="nodes-container-"], ' +
+                        'div[class*="image-nodes-container-"], ' +
+                        'div[class*="image-record-container-"]'
+                    ));
+                    console.log('📊 nodes-container数量:', nodesContainers.length);
+                    
+                    if (nodesContainers.length > 0) {
+                        // 取最后一个容器（通常是最新生成的）
+                        const lastContainer = nodesContainers[nodesContainers.length - 1];
+                        console.log('🎯 使用最后一个nodes-container提取图片');
+                        
+                        const containerImgs = Array.from(lastContainer.querySelectorAll(
+                            'img[data-apm-action*="ai-generated"], ' +
+                            'img[data-apm-action*="record-card"], ' +
+                            'img[src*="aigc_resize"], ' +
+                            'img[class*="image-card"], ' +
+                            'img[data-loaded="true"]'
+                        ));
+                        console.log('📊 最后一个nodes-container内图片数量:', containerImgs.length);
+                        
+                        for (const img of containerImgs) {
+                            let src = img.src || '';
+                            const srcset = img.getAttribute('srcset') || '';
+                            
+                            // 优先使用srcset中最高分辨率版本
+                            if (srcset) {
+                                try {
+                                    const candidates = srcset.split(',')
+                                        .map(s => s.trim().split(' ')[0])
+                                        .filter(Boolean)
+                                        .filter(url => url.includes('aigc_resize:') || url.includes('capcutapi') || url.includes('tos'));
+                                    if (candidates.length) {
+                                        let bestUrl = candidates[0];
+                                        let maxRes = getResolution(bestUrl);
+                                        for (const url of candidates) {
+                                            const res = getResolution(url);
+                                            if (res > maxRes) {
+                                                maxRes = res;
+                                                bestUrl = url;
+                                            }
+                                        }
+                                        src = bestUrl;
+                                    }
+                                } catch {}
+                            }
+                            
+                            // 添加包含aigc_resize的图片（至少128x128）
+                            if ((src.includes('aigc_resize:') || src.includes('capcutapi') || src.includes('tos')) && (img.naturalWidth || 0) >= 128) {
+                                console.log('🖼️ nodes-container中找到图片:', src, '尺寸:', img.naturalWidth, 'x', img.naturalHeight);
+                                results.add(src);
+                            } else {
+                                console.log('🗑️ nodes-container中过滤图片:', src, '宽度:', img.naturalWidth);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('⚠️ 提取nodes-container图片时出错:', e);
+                }
+                
+                // 如果上面的方法找到了图片，直接返回
+                if (results.size > 0) {
+                    console.log('✅ 从nodes-container中成功提取到图片');
+                    return Array.from(results);
+                }
+                
+                // 方法2: 查找所有包含AI生成标记的图片（更广泛的选择器，但限制数量）
+                const allImgs = Array.from(document.querySelectorAll(
+                    'img[data-apm-action*="ai-generated"], ' +
+                    'img[data-apm-action*="record-card"], ' +
+                    'img[src*="aigc_resize"], ' +
+                    'img[class*="image-card"], ' +
+                    'img[data-loaded="true"]'
+                ));
+                console.log('📊 找到AI图片数量:', allImgs.length);
+                
+                // 如果图片太多，可能包含了历史图片，只取最后几张
+                if (allImgs.length > 10) {
+                    console.log('⚠️ 图片数量过多，可能包含历史图片，只取最后10张');
+                    // 按照在DOM中的位置排序，取最后的图片
+                    allImgs.sort((a, b) => {
+                        // 获取元素在DOM中的位置
+                        const getPosition = (el) => {
+                            let position = 0;
+                            let current = el;
+                            while (current && current.parentElement) {
+                                position += Array.from(current.parentElement.children).indexOf(current);
+                                current = current.parentElement;
+                            }
+                            return position;
+                        };
+                        return getPosition(b) - getPosition(a); // 降序排列
+                    });
+                    // 只取最后10张图片
+                    const latestImgs = allImgs.slice(0, 10);
+                    console.log('📊 处理最新图片数量:', latestImgs.length);
+                    
+                    for (const img of latestImgs) {
+                        let src = img.src || '';
+                        const srcset = img.getAttribute('srcset') || '';
+                        
+                        // 优先使用srcset中最高分辨率版本
+                        if (srcset) {
+                            try {
+                                const candidates = srcset.split(',')
+                                    .map(s => s.trim().split(' ')[0])
+                                    .filter(Boolean)
+                                    .filter(url => url.includes('aigc_resize:') || url.includes('capcutapi') || url.includes('tos'));
+                                if (candidates.length) {
+                                    let bestUrl = candidates[0];
+                                    let maxRes = getResolution(bestUrl);
+                                    for (const url of candidates) {
+                                        const res = getResolution(url);
+                                        if (res > maxRes) {
+                                            maxRes = res;
+                                            bestUrl = url;
+                                        }
+                                    }
+                                    src = bestUrl;
+                                }
+                            } catch {}
+                        }
+                        
+                        // 添加包含aigc_resize的图片（至少128x128）
+                        if ((src.includes('aigc_resize:') || src.includes('capcutapi') || src.includes('tos')) && (img.naturalWidth || 0) >= 128) {
+                            console.log('🖼️ 找到最新图片:', src, '尺寸:', img.naturalWidth, 'x', img.naturalHeight);
+                            results.add(src);
+                        } else {
+                            console.log('🗑️ 过滤图片:', src, '宽度:', img.naturalWidth);
+                        }
+                    }
+                } else {
+                    // 图片数量不多，全部处理
+                    for (const img of allImgs) {
+                        let src = img.src || '';
+                        const srcset = img.getAttribute('srcset') || '';
+                        
+                        // 优先使用srcset中最高分辨率版本
+                        if (srcset) {
+                            try {
+                                const candidates = srcset.split(',')
+                                    .map(s => s.trim().split(' ')[0])
+                                    .filter(Boolean)
+                                    .filter(url => url.includes('aigc_resize:') || url.includes('capcutapi') || url.includes('tos'));
+                                if (candidates.length) {
+                                    let bestUrl = candidates[0];
+                                    let maxRes = getResolution(bestUrl);
+                                    for (const url of candidates) {
+                                        const res = getResolution(url);
+                                        if (res > maxRes) {
+                                            maxRes = res;
+                                            bestUrl = url;
+                                        }
+                                    }
+                                    src = bestUrl;
+                                }
+                            } catch {}
+                        }
+                        
+                        // 添加包含aigc_resize的图片（至少128x128）
+                        if ((src.includes('aigc_resize:') || src.includes('capcutapi') || src.includes('tos')) && (img.naturalWidth || 0) >= 128) {
+                            console.log('🖼️ 找到最新图片:', src, '尺寸:', img.naturalWidth, 'x', img.naturalHeight);
+                            results.add(src);
+                        } else {
+                            console.log('🗑️ 过滤图片:', src, '宽度:', img.naturalWidth);
+                        }
+                    }
+                }
+                
+                return Array.from(results);
+            }''')
+            
+            if urls:
+                self.logger.info(f"✅ 找到最新生成的 {len(urls)} 个图片")
+                # 按分辨率排序，优先返回高分辨率图片
+                def get_resolution(url):
+                    import re
+                    match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                    if match:
+                        return int(match.group(1)) * int(match.group(2))
+                    return 0
+                urls.sort(key=get_resolution, reverse=True)
+                return urls
+            else:
+                self.logger.warning("⚠️ 未找到最新生成的图片")
+                # 添加调试信息，输出页面上所有图片的数量
+                try:
+                    all_img_count = await self.page.evaluate('''() => {
+                        return document.querySelectorAll('img').length;
+                    }''')
+                    self.logger.debug(f"📊 页面上总图片数量: {all_img_count}")
+                except Exception as e:
+                    self.logger.debug(f"📊 获取页面图片总数失败: {e}")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"提取最新生成图片失败: {e}")
+            return []
+
+    async def extract_latest_generated_videos(self) -> List[str]:
+        try:
+            data = await self.page.evaluate(r'''() => {
+                const normalize = (u) => {
+                    if (!u) return '';
+                    return u.replace(/`/g, '').trim();
+                };
+                const isVideoUrl = (u) => {
+                    if (!u) return false;
+                    const l = u.toLowerCase();
+                    return l.endsWith('.mp4') || l.endsWith('.webm') || l.endsWith('.mov') ||
+                           l.includes('mime_type=video_') || l.includes('video_mp4') || l.includes('capcut') || l.includes('tos-alisg-ve');
+                };
+                const results = new Set();
+                const candidates = [];
+                const push = (u, score) => {
+                    const nu = normalize(u);
+                    if (!nu || !isVideoUrl(nu)) return;
+                    candidates.push({ url: nu, score: score });
+                };
+                // 优先：data-index=0 或最新视频容器中的 video
+                try {
+                    const currentIndex = document.querySelector('[data-index="0"]');
+                    if (currentIndex) {
+                        const vids = Array.from(currentIndex.querySelectorAll('video'));
+                        for (const v of vids) {
+                            push(v.getAttribute('src') || v.currentSrc || '', 1000);
+                            const sources = Array.from(v.querySelectorAll('source'));
+                            for (const s of sources) push(s.getAttribute('src') || '', 900);
+                        }
+                    }
+                } catch {}
+                // 次优：dreamina/video-element 容器
+                try {
+                    const containers = Array.from(document.querySelectorAll('[id^="dreamina-video-player-"], div[class*="video-element-"]'));
+                    for (const c of containers) {
+                        const v = c.querySelector('video');
+                        if (v) {
+                            push(v.getAttribute('src') || v.currentSrc || '', 800);
+                            const sources = Array.from(v.querySelectorAll('source'));
+                            for (const s of sources) push(s.getAttribute('src') || '', 700);
+                        }
+                    }
+                } catch {}
+                // 回退：页面所有 video
+                try {
+                    const all = Array.from(document.querySelectorAll('video'));
+                    for (const v of all) {
+                        push(v.getAttribute('src') || v.currentSrc || '', 600);
+                        const sources = Array.from(v.querySelectorAll('source'));
+                        for (const s of sources) push(s.getAttribute('src') || '', 500);
+                    }
+                } catch {}
+                // 回退：性能资源，按 startTime 排序
+                let perfCandidates = [];
+                try {
+                    const entries = performance.getEntriesByType('resource') || [];
+                    for (const e of entries) {
+                        const u = normalize(e.name || '');
+                        if (isVideoUrl(u)) {
+                            perfCandidates.push({ url: u, score: (e.startTime||0) });
+                        }
+                    }
+                } catch {}
+                // 合并候选并按 score 降序去重
+                const seen = new Set();
+                const merged = [...candidates, ...perfCandidates].sort((a,b)=>b.score-a.score);
+                const picked = [];
+                for (const item of merged) {
+                    const u = item.url;
+                    if (seen.has(u)) continue;
+                    seen.add(u);
+                    picked.push(u);
+                    if (picked.length >= 5) break; // 限制返回数量，避免噪声
+                }
+                return picked;
+            }''')
+            urls = data or []
+            # 路径过滤：如果存在多个，优先 capcut/tos 链接和 mp4
+            def score(u: str) -> int:
+                l = (u or '').lower()
+                s = 0
+                if 'capcut' in l or 'tos-alisg-ve' in l: s += 50
+                if '.mp4' in l or 'video_mp4' in l or 'mime_type=video_' in l: s += 50
+                return s
+            urls = sorted(list(dict.fromkeys(urls)), key=score, reverse=True)
+            return urls
+        except Exception:
+            return []
+
+    async def extract_latest_video_posters(self) -> List[str]:
         try:
             urls = await self.page.evaluate(r'''() => {
                 const results = new Set();
+                const norm = (u) => (u||'').replace(/`/g,'').trim();
+                // 常规骨架图
+                const imgs = Array.from(document.querySelectorAll('img[class*="video-skeleton-img-"]'));
+                for (const img of imgs) {
+                    const u = norm(img.getAttribute('src') || '');
+                    if (u) results.add(u);
+                }
+                // 容器背景图
+                const getBg = (el) => {
+                    try {
+                        const s = getComputedStyle(el);
+                        const m = /url\(["']?(.*?)["']?\)/.exec(s.backgroundImage||'');
+                        return m ? norm(m[1]) : '';
+                    } catch { return ''; }
+                };
+                const containers = Array.from(document.querySelectorAll('[class*="video-card-container-"] , [class*="video-wrapper-"] , [class*="controls-"]'));
+                for (const c of containers) {
+                    const u = getBg(c);
+                    if (u) results.add(u);
+                }
+                return Array.from(results);
+            }''')
+            return urls or []
+        except Exception:
+            return []
+
+    async def get_video_progress(self) -> Optional[int]:
+        try:
+            val = await self.page.evaluate(r'''() => {
+                const badge = document.querySelector('[class*="progress-badge-"]');
+                const loading = document.querySelector('[class*="loading-container-"]');
+                const container = document.querySelector('[class*="video-record-container-"]');
+                const txt = (badge && badge.textContent) ? badge.textContent.trim() : '';
+                const m = /(\d+)\s*%/i.exec(txt);
+                if (m) return parseInt(m[1]);
+                if (container && !loading) return 100;
+                if (badge) return 99;
+                return null;
+            }''')
+            return val if isinstance(val, (int, float)) else None
+        except Exception:
+            return None
+
+    async def check_video_in_progress(self) -> bool:
+        try:
+            return await self.page.evaluate(r'''() => {
+                const container = document.querySelector('[class*="video-record-container-"]');
+                const loading = document.querySelector('[class*="loading-container-"]');
+                const badge = document.querySelector('[class*="progress-badge-"]');
+                const txt = (badge && badge.textContent) ? badge.textContent : '';
+                const m = /(\d+)\s*%/i.exec(txt);
+                const percent = m ? parseInt(m[1]) : null;
+                if (percent == null && container && !loading) return false;
+                if (percent != null) return percent < 100;
+                return !!container && (!!loading || !!badge);
+            }''')
+        except Exception:
+            return False
+
+    async def wait_for_video_done(self, max_wait: int = 900, grace_seconds: int = 0) -> List[str]:
+        start = time.time()
+        vids: List[str] = []
+        try:
+            while time.time() - start < max_wait:
+                try:
+                    p = await self.get_video_progress()
+                except Exception:
+                    p = None
+                if p is not None:
+                    self.logger.info(f"🎞 视频进度: {p}%")
+                vids = await self.extract_latest_generated_videos()
+                if vids:
+                    return vids
+                # 若进度达到100或加载容器消失，最后再尝试一次
+                if p is not None and p >= 100:
+                    if grace_seconds and grace_seconds > 0:
+                        try:
+                            await asyncio.sleep(grace_seconds)
+                        except Exception:
+                            pass
+                    vids = await self.extract_latest_generated_videos()
+                    if vids:
+                        return vids
+                # 若仍未完成，继续等待
+                await asyncio.sleep(2)
+            return vids
+        except Exception:
+            return vids
+
+    async def click_first_video_and_capture_url(self, pre_wait: int = 0, timeout_ms: int = 15000) -> List[str]:
+        try:
+            if pre_wait and pre_wait > 0:
+                try:
+                    await asyncio.sleep(pre_wait)
+                except Exception:
+                    pass
+            sel = 'div[id^="dreamina-video-player-"] video, div[class*="video-element-"] video, video'
+            try:
+                count = await self.page.locator(sel).count()
+            except Exception:
+                count = 0
+            if count == 0:
+                return []
+            el = self.page.locator(sel).first
+            try:
+                await el.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            try:
+                await el.click()
+            except Exception:
+                pass
+            def _pred(r):
+                try:
+                    url = r.url or ''
+                    headers = getattr(r, 'headers', {}) or {}
+                    ct = ''
+                    try:
+                        ct = headers.get('content-type', '').lower()
+                    except Exception:
+                        ct = ''
+                    lu = url.lower()
+                    return (
+                        ('video' in ct) or (
+                            (lu.startswith('http://') or lu.startswith('https://')) and
+                            (not lu.startswith('blob:')) and (
+                                lu.endswith('.mp4') or ('mime_type=video_' in lu) or ('video_mp4' in lu)
+                            ) and (
+                                ('capcut.com' in lu) or ('tos-alisg-ve' in lu)
+                            )
+                        )
+                    )
+                except Exception:
+                    return False
+            try:
+                resp = await self.page.wait_for_response(_pred, timeout=timeout_ms)
+            except Exception:
+                resp = None
+            if resp and resp.url:
+                return [resp.url]
+            return []
+        except Exception:
+            return []
+
+    async def extract_fullsize_images_from_dom(self) -> List[str]:
+        """提取高分辨率图片（支持多种分辨率）"""
+        try:
+            urls = await self.page.evaluate(r'''() => {
+                const results = new Set();
+                
+                // 辅助函数：从URL中提取分辨率
+                const getResolution = (url) => {
+                    const match = /aigc_resize:(\d+):(\d+)/.exec(url);
+                    if (match) {
+                        return parseInt(match[1]) * parseInt(match[2]);
+                    }
+                    return 0;
+                };
                 
                 // 方法1: 直接从图片查看器中获取大图
                 const imagePlayers = Array.from(document.querySelectorAll('div[class*="image-player"]'));
@@ -1191,35 +2325,45 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                     const imgs = Array.from(player.querySelectorAll('img[data-apm-action*="detail-card"], img[class*="image-"]'));
                     for (const img of imgs) {
                         const src = img.src || '';
-                        // 只收集包含1080:1080的图片
-                        if (src.includes('aigc_resize:1080:1080')) {
+                        // 收集包含aigc_resize的图片（任意分辨率）
+                        if (src.includes('aigc_resize:') && (img.naturalWidth || 0) >= 256) {
                             results.add(src);
                         }
                     }
                 }
                 
-                // 方法2: 查找所有包含1080:1080的图片
+                // 方法2: 查找所有包含aigc_resize的高分辨率图片
                 const allImgs = Array.from(document.querySelectorAll('img'));
                 for (const img of allImgs) {
                     let src = img.src || '';
                     const srcset = img.getAttribute('srcset') || '';
                     
-                    // 优先使用srcset中的1080:1080版本
+                    // 优先使用srcset中最高分辨率版本
                     if (srcset) {
                         try {
                             const candidates = srcset.split(',')
                                 .map(s => s.trim().split(' ')[0])
                                 .filter(Boolean)
-                                .filter(url => url.includes('aigc_resize:1080:1080'));
+                                .filter(url => url.includes('aigc_resize:'));
                             if (candidates.length) {
-                                src = candidates[candidates.length - 1];
+                                // 找到分辨率最高的
+                                let bestUrl = candidates[0];
+                                let maxRes = getResolution(bestUrl);
+                                for (const url of candidates) {
+                                    const res = getResolution(url);
+                                    if (res > maxRes) {
+                                        maxRes = res;
+                                        bestUrl = url;
+                                    }
+                                }
+                                src = bestUrl;
                             }
                         } catch {}
                     }
                     
-                    // 只添加1080:1080的图片
-                    if (src.includes('aigc_resize:1080:1080') && 
-                        (img.naturalWidth || 0) >= 1000 && (img.naturalHeight || 0) >= 1000) {
+                    // 添加包含aigc_resize的高分辨率图片（至少256x256）
+                    if (src.includes('aigc_resize:') && 
+                        (img.naturalWidth || 0) >= 256 && (img.naturalHeight || 0) >= 256) {
                         results.add(src);
                     }
                 }
@@ -1227,27 +2371,30 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 return Array.from(results);
             }''')
             
-            # 确保只返回1080:1080的图片
-            filtered_urls = [url for url in (urls or []) if 'aigc_resize:1080:1080' in url]
-            try:
-                if self.pre_gen_image_urls:
-                    prev = set(self.pre_gen_image_urls)
-                    filtered_urls = [u for u in filtered_urls if u not in prev]
-            except Exception:
-                pass
+            # 过滤出高分辨率的图片
+            filtered_urls = [url for url in (urls or []) if 'aigc_resize:' in url]
             
-            # 如果没有找到1080:1080的图片，尝试从网络请求中获取
+            # 如果没有找到aigc_resize的图片，尝试从网络请求中获取
             if not filtered_urls:
-                filtered_urls = await self.extract_1080_images_from_network()
+                filtered_urls = await self.extract_highres_images_from_network()
+            else:
+                # 按分辨率排序，优先返回高分辨率图片
+                def get_resolution(url):
+                    import re
+                    match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                    if match:
+                        return int(match.group(1)) * int(match.group(2))
+                    return 0
+                filtered_urls.sort(key=get_resolution, reverse=True)
                 
             return filtered_urls
             
         except Exception as e:
-            self.logger.debug(f"提取1080:1080大图失败: {e}")
+            self.logger.debug(f"提取高分辨率图片失败: {e}")
             return []
 
-    async def extract_1080_images_from_network(self) -> List[str]:
-        """从网络请求中专门提取1080:1080的大图"""
+    async def extract_highres_images_from_network(self) -> List[str]:
+        """从网络请求中提取高分辨率图片"""
         try:
             resources = await self.page.evaluate('''() => {
                 try {
@@ -1262,34 +2409,34 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                     st = (r.get('startTime') if isinstance(r, dict) else 0)
                     if not n:
                         continue
-                    if 'aigc_resize:1080:1080' in n:
-                        urls.append((n, st or 0))
+                    if 'aigc_resize:' in n and (st >= (self.generation_started_perf or 0)):
+                        urls.append(n)
             except Exception:
-                urls = []
-            try:
-                if self.generation_started_perf:
-                    urls = [u for (u, st) in urls if st >= (self.generation_started_perf or 0)]
-                else:
-                    base = set(self.pre_perf_names or [])
-                    urls = [u for (u, _st) in urls if u not in base]
-            except Exception:
-                urls = [u for (u, _st) in urls]
-            return list(dict.fromkeys(urls))
-            
+                pass
+            # 去重并按分辨率排序
+            urls = list(set(urls))
+            def get_resolution(url):
+                import re
+                match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                if match:
+                    return int(match.group(1)) * int(match.group(2))
+                return 0
+            urls.sort(key=get_resolution, reverse=True)
+            return urls
         except Exception as e:
-            self.logger.debug(f"从网络请求提取1080大图失败: {e}")
+            self.logger.debug(f"从网络请求提取高分辨率图片失败: {e}")
             return []
 
     async def wait_for_1080_image_load(self, timeout: float = 10.0) -> List[str]:
-        """等待1080:1080大图加载完成"""
+        """等待高分辨率图片加载完成"""
         try:
-            # 等待包含1080:1080的图片加载
+            # 等待包含aigc_resize的图片加载
             await self.page.wait_for_function(
                 '''() => {
                     const imgs = Array.from(document.querySelectorAll('img'));
                     return imgs.some(img => {
                         const src = img.src || '';
-                        return src.includes('aigc_resize:1080:1080') && 
+                        return src.includes('aigc_resize:') && 
                                img.complete && 
                                (img.naturalWidth || 0) > 0;
                     });
@@ -1297,11 +2444,11 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 timeout=timeout * 1000
             )
             
-            # 提取所有1080:1080图片
+            # 提取所有高分辨率图片
             return await self.extract_fullsize_images_from_dom()
             
         except Exception as e:
-            self.logger.debug(f"等待1080图片加载超时: {e}")
+            self.logger.debug(f"等待高分辨率图片加载超时: {e}")
             return []
 
     async def click_preview_and_get_1080_image(self):
@@ -1309,35 +2456,69 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         预览图 → 中图 → 等待加载 → 点击中图 → 大图 → 获取URL → 关闭大图 → 关闭中图 → 下一张
         并包含完整日志（第几张 / 总数）
         """
-
+        
         results = []
-
+        
         # ================================
-        # 0）获取所有预览图
+        # 0）获取所有预览图（优先从data-index="0"容器中获取）
         # ================================
-        thumbs = self.page.locator(
-            'img[data-apm-action*="record-card"], '
-            'div[class*="image-card-container"] img, '
-            'div[class*="responsive-common-grid-"] img'
-        )
+        thumbs = None
+        try:
+            # 优先从data-index="0"容器中获取预览图
+            current_index_container = self.page.locator('[data-index="0"]')
+            if await current_index_container.count() > 0:
+                self.logger.info("🎯 从data-index=\"0\"容器中获取预览图")
+                thumbs = current_index_container.locator(
+                    'img[data-apm-action*="record-card"], '
+                    'div[class*="image-card-container"] img, '
+                    'div[class*="responsive-common-grid-"] img'
+                )
+            else:
+                # 如果没有data-index="0"容器，尝试从最新的nodes-container中获取
+                container = self.page.locator('div[class*="nodes-container-"]').last
+                if await container.count() > 0:
+                    self.logger.info("🎯 从最新的nodes-container中获取预览图")
+                    thumbs = container.locator(
+                        'img[data-apm-action*="record-card"], '
+                        'div[class*="image-card-container"] img, '
+                        'div[class*="responsive-common-grid-"] img'
+                    )
+                else:
+                    # 回退到全局查找
+                    self.logger.info("🔄 从全局范围获取预览图")
+                    thumbs = self.page.locator(
+                        'img[data-apm-action*="record-card"], '
+                        'div[class*="image-card-container"] img, '
+                        'div[class*="responsive-common-grid-"] img'
+                    )
+        except Exception as e:
+            self.logger.warning(f"⚠ 获取预览图容器失败，使用全局查找: {e}")
+            thumbs = self.page.locator(
+                'img[data-apm-action*="record-card"], '
+                'div[class*="image-card-container"] img, '
+                'div[class*="responsive-common-grid-"] img'
+            )
+        
         try:
             count = await thumbs.count()
         except:
             count = 0
-
-        self.logger.info(f"🔍 检测到预览图数量: {count}")
-
-        if count == 0:
+        
+        # 限制预览图数量，避免处理过多历史图片
+        max_preview_count = min(count, 8)  # 最多处理8张预览图
+        self.logger.info(f"🔍 检测到预览图数量: {count}, 实际处理数量: {max_preview_count}")
+        
+        if max_preview_count == 0:
             self.logger.warning("⚠ 没有可点击的预览图，流程结束")
             return results
-
+        
         # ================================
         # 循环处理每一张预览图
         # ================================
-        for i in range(count):
+        for i in range(max_preview_count):
             index = i + 1
-            self.logger.info(f"➡ 开始处理第 {index} / {count} 张预览图")
-
+            self.logger.info(f"➡ 开始处理第 {index} / {max_preview_count} 张预览图")
+            
             # 用于捕获 4096 大图的网络请求
             hd4096 = set()
             def on_resp(res):
@@ -1345,12 +2526,12 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 if "aigc_resize:4096" in u or "/4096:" in u:
                     hd4096.add(u)
                     self.logger.info(f"📡 捕获到 4096 请求: {u}")
-
+            
             try:
                 self.page.on("response", on_resp)
             except:
                 pass
-
+            
             # ================================
             # 1）点击预览图
             # ================================
@@ -1362,7 +2543,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
             except Exception as e:
                 self.logger.warning(f"⚠ 第 {index} 张预览图点击失败，将跳过该图: {e}")
                 continue
-
+            
             # ================================
             # 2）等待中图加载完成
             # ================================
@@ -1382,7 +2563,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 try: await self.page.keyboard.press("Escape")
                 except: pass
                 continue
-
+            
             # ================================
             # 3）点击中图放大
             # ================================
@@ -1400,19 +2581,34 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 try: await self.page.keyboard.press("Escape")
                 except: pass
                 continue
-
+            
             # ================================
             # 4）等待大图加载（优先监听 4096）
             # ================================
             picked = None
-            start = time.time()
-            while time.time() - start < 4:
-                if hd4096:
-                    picked = next(iter(hd4096))
-                    self.logger.info(f"🎯 第 {index} 张成功捕获 4096 大图 URL")
-                    break
-                await asyncio.sleep(0.3)
 
+            # 先主动等待网络响应，提升稳定性
+            try:
+                resp = await self.page.wait_for_response(
+                    lambda r: ("aigc_resize:4096" in r.url) or ("/4096:" in r.url),
+                    timeout=8000
+                )
+                if resp:
+                    picked = resp.url
+                    self.logger.info(f"🎯 第 {index} 张成功捕获 4096 大图 URL")
+            except Exception:
+                pass
+
+            # 若未命中，继续轮询监听到的 4096 请求集合
+            if not picked:
+                start = time.time()
+                while time.time() - start < 8:
+                    if hd4096:
+                        picked = next(iter(hd4096))
+                        self.logger.info(f"🎯 第 {index} 张成功捕获 4096 大图 URL")
+                        break
+                    await asyncio.sleep(0.3)
+            
             # 如果没捕获到 4096，尝试从 DOM 抓取
             if not picked:
                 try:
@@ -1422,22 +2618,15 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                         self.logger.info(f"📥 第 {index} 张从 DOM 提取到大图 URL: {picked}")
                 except:
                     pass
-
+            
             # ================================
             # 5）记录大图 URL
             # ================================
             if picked:
-                try:
-                    prev = set(self.pre_gen_image_urls or [])
-                    if picked in prev:
-                        picked = None
-                except Exception:
-                    pass
-            if picked:
                 results.append(picked)
             else:
                 self.logger.warning(f"⚠ 第 {index} 张未获取到大图 URL")
-
+            
             # ================================
             # 6）关闭大图
             # ================================
@@ -1447,10 +2636,10 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 self.logger.info(f"❌ 已关闭第 {index} 张的大图")
             except:
                 pass
-
+            
             # 7）等待 2 秒（避免卡顿）
             await asyncio.sleep(2)
-
+            
             # 8）关闭中图
             try:
                 await self.page.keyboard.press("Escape")
@@ -1458,14 +2647,14 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 self.logger.info(f"❌ 已关闭第 {index} 张的中图")
             except:
                 pass
-
-            self.logger.info(f"✅ 第 {index} / {count} 张预览图处理完成\n")
-
+            
+            self.logger.info(f"✅ 第 {index} / {max_preview_count} 张预览图处理完成\n")
+        
         # ================================
         # 全部结束
         # ================================
         self.logger.info(f"🎉 所有预览图处理完毕，共获取到 {len(results)} 张大图")
-
+        
         return results
 
 
@@ -1518,12 +2707,6 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 return Array.from(results);
             }''')
             urls = urls or []
-            if self.pre_gen_image_urls:
-                try:
-                    prev = set(self.pre_gen_image_urls)
-                    urls = [u for u in urls if u not in prev]
-                except Exception:
-                    pass
             return urls
         except Exception as e:
             self.logger.debug(f"DOM提取生成图片失败: {e}")
@@ -2418,154 +3601,438 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         额外增加"Regenerate/重新生成"按钮出现作为完成信号。
         """
         try:
-            # 检查是否存在"停止/Stop"按钮（生成中）
-            stop_count = await self.page.locator('button:has-text("停止"), button:has-text("Stop")').count()
-
-            # 检查"发送/Send"按钮是否存在且为 disabled（生成已结束、输入为空）
-            send_locator = self.page.locator('button:has-text("发送"), button:has-text("Send")')
-            send_count = await send_locator.count()
+            self.logger.debug("🔍 开始检测生成完成状态...")
+            
+            # 查找发送按钮（多种方式确保能找到）
+            send_button_locator = self.page.locator(
+                'button.lv-btn:has(svg path[d*="M12.002 3c.424 0 .806.177"]), ' +
+                'button:has-text("发送"), button:has-text("Send"), ' +
+                'button.lv-btn-primary:not(:has(svg path[d*="M4.5 10.9c0-2.24"]))'
+            )
+            send_button_count = await send_button_locator.count()
+            self.logger.debug(f"📤 发送按钮数量: {send_button_count}")
+            
+            # 查找停止按钮（多种方式确保能找到）
+            stop_button_locator = self.page.locator(
+                'button.lv-btn:has(svg path[d*="M4.5 10.9c0-2.24"]), ' +
+                'button:has-text("停止"), button:has-text("Stop")'
+            )
+            stop_button_count = await stop_button_locator.count()
+            self.logger.debug(f"⏹️ 停止按钮数量: {stop_button_count}")
+            
+            # 检查发送按钮状态
             send_disabled = False
-            if send_count > 0:
-                first = send_locator.first
+            if send_button_count > 0:
+                first_send = send_button_locator.first
                 try:
-                    send_disabled = await first.is_disabled()
-                except Exception:
-                    # 兼容非标准禁用：disabled 属性、aria-disabled、类名 lv-btn-disabled
-                    disabled_attr = await first.get_attribute('disabled')
-                    aria_disabled = await first.get_attribute('aria-disabled')
-                    classes = await first.get_attribute('class') or ''
-                    send_disabled = (disabled_attr is not None) or (aria_disabled == 'true') or ('lv-btn-disabled' in classes)
-
+                    # 检查按钮是否被禁用
+                    is_disabled = await first_send.is_disabled()
+                    disabled_attr = await first_send.get_attribute('disabled')
+                    aria_disabled = await first_send.get_attribute('aria-disabled')
+                    classes = await first_send.get_attribute('class') or ''
+                    has_disabled_class = 'lv-btn-disabled' in classes
+                    
+                    send_disabled = is_disabled or (disabled_attr is not None) or (aria_disabled == 'true') or has_disabled_class
+                    self.logger.debug(f"📤 发送按钮状态 - is_disabled: {is_disabled}, disabled_attr: {disabled_attr}, aria_disabled: {aria_disabled}, has_disabled_class: {has_disabled_class}")
+                    self.logger.debug(f"📤 发送按钮是否禁用: {send_disabled}")
+                except Exception as e:
+                    self.logger.debug(f"📤 检查发送按钮状态异常: {e}")
+            
             # 检测是否出现"Regenerate/重新生成"按钮（常见于生成完成后显示）
             regen_locator = self.page.locator('[role="button"]:has-text("Regenerate"), button:has-text("Regenerate"), [role="button"]:has-text("重新生成"), button:has-text("重新生成")')
             regen_count = await regen_locator.count()
+            self.logger.debug(f"🔄 重新生成按钮数量: {regen_count}")
+            
             regen_visible = False
             if regen_count > 0:
                 try:
                     regen_visible = await regen_locator.first.is_visible()
-                except Exception:
+                    self.logger.debug(f"🔄 重新生成按钮是否可见: {regen_visible}")
+                except Exception as e:
+                    self.logger.debug(f"🔄 检查重新生成按钮可见性异常: {e}")
                     regen_visible = True  # 若取可见性异常，存在即可视为强信号
+            
+            # 视频进度（若存在）
+            video_percent = None
+            try:
+                video_percent = await self.get_video_progress()
+                self.logger.debug(f"🎞 视频进度百分比: {video_percent}")
+            except Exception:
+                video_percent = None
 
-            # 完成条件：出现 Regenerate 按钮，或 无停止按钮且发送按钮禁用
-            return regen_visible or ((stop_count == 0) and send_disabled)
+            # 完成条件：
+            # 1. 出现 Regenerate 按钮（最强信号）
+            # 2. 无停止按钮且发送按钮禁用，且无视频进度或视频进度>=100（避免视频生成未完成时误判）
+            # 3. 无停止按钮且无发送按钮（可能页面已刷新或跳转）
+            send_disabled_done = (stop_button_count == 0) and send_disabled and (video_percent is None or (isinstance(video_percent, (int, float)) and video_percent >= 100))
+            result = regen_visible or send_disabled_done or ((stop_button_count == 0) and (send_button_count == 0))
+            self.logger.debug(f"🏁 生成完成检测结果: {result}")
+            self.logger.debug(f"🏁 判断条件: regen_visible={regen_visible}, stop_button_count={stop_button_count}, send_disabled={send_disabled}, send_button_count={send_button_count}, video_percent={video_percent}")
+            return result
+        except Exception as e:
+            self.logger.debug(f"按钮状态检测失败: {e}")
+            return False
+
         except Exception as e:
             self.logger.debug(f"按钮状态检测失败: {e}")
             return False
     
     async def wait_for_generation_complete(self, max_wait_time: int = 3600, highres_timeout: int = 60) -> TaskResult:
-        """等待任务生成完成并获取1080:1080大图"""
+        """等待任务生成完成并获取结果（优先依赖API响应监听器）"""
         start_time = time.time()
         try:
-            # 阶段1：等待 task_id 或页面生成提示
-            while True:
+            # 步骤1: 等待生成开始
+            self.logger.info("等待生成开始...")
+            
+            # 记录快照(仅作为降级方案使用)
+            try:
+                self.pre_gen_image_urls = await self.extract_all_images_from_dom()
+                self.logger.info(f"📸 已记录页面快照: {len(self.pre_gen_image_urls)}个历史图片")
+            except Exception as e:
+                self.logger.warning(f"记录快照失败: {e}")
+            
+            # 步骤2: 等待API响应监听器获取到task_id（不必须）
+            task_id_wait_start = time.time()
+            while (time.time() - task_id_wait_start) < 60:  # 最多等待60秒
                 if self.task_id:
+                    self.logger.info(f"✅ 已获取到task_id: {self.task_id}")
                     break
-                try:
-                    # 直接查找1080大图
-                    urls = await self.extract_fullsize_images_from_dom()
-                    if urls:
-                        self.image_urls = urls
-                        self.generation_completed = True
-                        return TaskResult(
-                            code=ErrorCode.SUCCESS.value, 
-                            data=self.image_urls, 
-                            message="成功获取1080:1080大图"
-                        )
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-                if (time.time() - start_time) > max_wait_time:
-                    break
-
-            # 阶段2：检测页面引号图标，确认图片生成完成
-            if self.task_id:
-                self.logger.info("任务ID已获取，开始检测页面引号图标...")
-                quote_start = time.time()
-                quote_refreshed = False
-                image_wait_start = None
-                while (time.time() - quote_start) < max_wait_time:
+                await asyncio.sleep(0.5)
+            
+            if not self.task_id:
+                self.logger.warning("⚠️ 10秒内未获取到task_id,将使用降级方案")
+            
+            # 步骤3: 等待生成完成（通过按钮状态判断）
+            self.logger.info("等待生成完成...")
+            generation_wait_start = time.time()
+            last_check_time = 0
+            # 添加一个快速检测标志，如果等待超过30秒就降低检测频率
+            quick_check_mode = True
+            
+            while (time.time() - generation_wait_start) < max_wait_time:
+                # 方法1: 检查API响应监听器是否已标记完成（优先）
+                if self.generation_completed and self.image_urls:
+                    self.logger.info(f"✅ API响应监听器检测到生成完成")
+                    vids = []
                     try:
-                        # 检测 class 中包含 card-icon-button 的图标元素
-                        icons = await self.page.query_selector_all('div[class*="card-icon-button"] svg, div[class*="card-icon-button"] [role="img"], div[class*="card-icon-button"] [aria-label*="quote"]')
-                        if icons and len(icons) > 0:
-                            self.logger.info("✅ 检测到引号图标，准备获取1080大图...")
-                            if image_wait_start is None:
-                                image_wait_start = time.time()
-                            
-                            # 方法1: 直接提取1080大图
-                            urls = await self.extract_fullsize_images_from_dom()
-                            if urls:
-                                self.image_urls = urls
-                                self.generation_completed = True
-                                return TaskResult(
-                                    code=ErrorCode.SUCCESS.value,
-                                    data=self.image_urls,
-                                    message="直接提取1080:1080大图成功"
-                                )
-                            
-                            # 方法2: 点击预览图获取大图
-                            self.logger.info("尝试点击预览图获取1080大图...")
-                            click_urls = await self.click_preview_and_get_1080_image()
-                            if click_urls:
-                                self.image_urls = click_urls
-                                self.generation_completed = True
-                                return TaskResult(
-                                    code=ErrorCode.SUCCESS.value,
-                                    data=self.image_urls,
-                                    message="点击预览图获取1080:1080大图成功"
-                                )
-                            # 检查高分辨率超时
-                            if image_wait_start and (time.time() - image_wait_start) > highres_timeout:
-                                return TaskResult(
-                                    code=ErrorCode.GENERATION_FAILED.value,
-                                    data=None,
-                                    message="1分钟未检测到1080:1080大图，结束任务"
-                                )
-                                
-                    except Exception as e:
-                        self.logger.debug(f"检测引号图标出错: {e}")
-                    await asyncio.sleep(2)
-                    
-                    # 6分钟未检测到刷新页面
-                    if (not quote_refreshed) and ((time.time() - quote_start) >= 360):
-                        self.logger.info("超过6分钟未检测到引号图标，刷新页面重试...")
+                        in_progress = await self.check_video_in_progress()
+                    except Exception:
+                        in_progress = False
+                    if in_progress:
+                        self.logger.info("🎞 检测到视频仍在生成，等待直到完成或超时")
+                        await self.wait_for_video_done(900, 10)
+                        vids = await self.click_first_video_and_capture_url(0, 15000)
                         try:
-                            await self.page.reload()
-                            await asyncio.sleep(3)
+                            imgs2 = await self.extract_latest_generated_images()
+                            if imgs2:
+                                new_imgs2 = [u for u in imgs2 if u not in (self.pre_gen_image_urls or [])]
+                                if new_imgs2:
+                                    self.image_urls = new_imgs2
                         except Exception:
                             pass
-                        quote_refreshed = True
-                        quote_start = time.time()
-
-            # 阶段3：兜底检测
-            self.logger.info("执行兜底检测...")
+                    else:
+                        vids = await self.click_first_video_and_capture_url(10, 15000) or await self.extract_latest_generated_videos()
+                    posters = []
+                    try:
+                        posters = await self.extract_latest_video_posters()
+                    except Exception:
+                        posters = []
+                    ctype = "image" if not vids else ("mixed" if self.image_urls and vids else "video")
+                    try:
+                        for i, vu in enumerate(vids or [], 1):
+                            self.logger.info(f"视频{i} URL: {vu}")
+                    except Exception:
+                        pass
+                    return TaskResult(
+                        code=ErrorCode.SUCCESS.value,
+                        data={"images": self.image_urls, "videos": vids, "posters": posters, "type": ctype},
+                        message=f"获取结果成功"
+                    )
+                
+                # 方法2: 每2秒通过按钮状态检测生成是否完成
+                elapsed = time.time() - generation_wait_start
+                check_interval = 2 if quick_check_mode else 5  # 快速模式每2秒检查，慢速模式每5秒检查
+                
+                # 如果等待超过30秒，切换到慢速检测模式
+                if elapsed > 30:
+                    quick_check_mode = False
+                    # 每60秒输出一次详细日志
+                    if int(elapsed) % 60 == 0:
+                        self.logger.info(f"⏳ 仍在等待生成完成... 已等待 {int(elapsed)} 秒, task_id: {self.task_id or '未获取'}")
+                
+                if int(elapsed) - last_check_time >= check_interval:
+                    last_check_time = int(elapsed)
+                    
+                    # 检查生成是否已完成
+                    try:
+                        generation_finished = await self.check_generation_finished_by_button_state()
+                        if generation_finished:
+                            self.logger.info("✅ 按钮状态检测到生成完成，开始提取结果...")
+                            
+                            # 直接使用最新图片提取方法（不需要task_id和data-id定位）
+                            self.logger.info("🔄 使用最新图片提取方法")
+                            urls = await self.extract_latest_generated_images()
+                            
+                            self.logger.info(f"📊 提取到 {len(urls)} 个图片URL")
+                            if urls:
+                                # 输出图片分辨率信息
+                                for idx, url in enumerate(urls, 1):
+                                    import re
+                                    match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                                    if match:
+                                        width, height = match.group(1), match.group(2)
+                                        res = int(width) * int(height)
+                                        self.logger.info(f"  图片{idx}: {width}x{height} (分辨率: {res})")
+                                
+                                # 检查是否都是低分辨率预览图（360x360或更小）
+                                def get_resolution(url):
+                                    import re
+                                    match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                                    if match:
+                                        return int(match.group(1)) * int(match.group(2))
+                                    return 0
+                                
+                                max_res = max([get_resolution(u) for u in urls], default=0)
+                                if max_res < 512 * 512:  # 所有图片都小于512x512
+                                    self.logger.warning(f"⚠️ 检测到的图片都是低分辨率预览图（最高分辨率: {max_res}），尝试点击预览图获取大图...")
+                                    # 尝试点击预览图获取大图
+                                    try:
+                                        big_urls = await self.click_preview_and_get_1080_image()
+                                        if big_urls:
+                                            self.logger.info(f"✅ 通过点击预览图获取到 {len(big_urls)} 张大图")
+                                            urls = big_urls
+                                        else:
+                                            self.logger.warning("⚠️ 点击预览图未获取到大图")
+                                    except Exception as click_e:
+                                        self.logger.warning(f"⚠️ 点击预览图失败: {click_e}")
+                                
+                                # 过滤历史数据，只保留新生成的图片
+                                new_urls = [url for url in urls if url not in (self.pre_gen_image_urls or [])]
+                                self.logger.info(f"📊 过滤后新图片: {len(new_urls)} 个")
+                                
+                                if new_urls:
+                                    self.logger.info("✅ 过滤历史数据成功")
+                                    self.image_urls = new_urls
+                                    self.generation_completed = True
+                                    try:
+                                        in_progress = await self.check_video_in_progress()
+                                    except Exception:
+                                        in_progress = False
+                                    if in_progress:
+                                        await self.wait_for_video_done(900, 10)
+                                        vids = await self.click_first_video_and_capture_url(0, 15000)
+                                        try:
+                                            imgs2 = await self.extract_latest_generated_images()
+                                            if imgs2:
+                                                new_imgs2 = [u for u in imgs2 if u not in (self.pre_gen_image_urls or [])]
+                                                if new_imgs2:
+                                                    self.image_urls = new_imgs2
+                                        except Exception:
+                                            pass
+                                    else:
+                                        vids = await self.click_first_video_and_capture_url(10, 15000) or await self.extract_latest_generated_videos()
+                                    posters = []
+                                    try:
+                                        posters = await self.extract_latest_video_posters()
+                                    except Exception:
+                                        posters = []
+                                    ctype = "image" if not vids else ("mixed" if self.image_urls and vids else "video")
+                                    self.logger.info(f"✅ DOM提取成功，图片 {len(new_urls)}，视频 {len(vids)}")
+                                    try:
+                                        for i, vu in enumerate(vids or [], 1):
+                                            self.logger.info(f"视频{i} URL: {vu}")
+                                    except Exception:
+                                        pass
+                                    return TaskResult(
+                                        code=ErrorCode.SUCCESS.value,
+                                        data={"images": self.image_urls, "videos": vids, "posters": posters, "type": ctype},
+                                        message="DOM提取结果成功"
+                                    )
+                            else:
+                                self.logger.warning("⚠️ 过滤后无新图片，尝试直接提取视频")
+                                try:
+                                    in_progress = await self.check_video_in_progress()
+                                except Exception:
+                                    in_progress = False
+                                if in_progress:
+                                    await self.wait_for_video_done(900, 10)
+                                    vids = await self.click_first_video_and_capture_url(0, 15000)
+                                else:
+                                    vids = await self.click_first_video_and_capture_url(10, 15000) or await self.extract_latest_generated_videos()
+                                posters = []
+                                try:
+                                    posters = await self.extract_latest_video_posters()
+                                except Exception:
+                                    posters = []
+                                if vids:
+                                    self.logger.info(f"✅ 仅视频生成完成，视频 {len(vids)}")
+                                    try:
+                                        for i, vu in enumerate(vids or [], 1):
+                                            self.logger.info(f"视频{i} URL: {vu}")
+                                    except Exception:
+                                        pass
+                                    return TaskResult(
+                                        code=ErrorCode.SUCCESS.value,
+                                        data={"images": [], "videos": vids, "posters": posters, "type": "video"},
+                                        message="仅视频结果成功"
+                                    )
+                        else:
+                            # 如果等待超过600秒且按钮状态检测不到完成，尝试直接检测引号图标
+                            if elapsed > 600:
+                                try:
+                                    icons = await self.page.query_selector_all('div[class*="card-icon-button"] svg, div[class*="card-icon-button"] [role="img"]')
+                                    icon_count = len(icons) if icons else 0
+                                    if icon_count > 0:
+                                        self.logger.info(f"⏰ 等待超时但检测到 {icon_count} 个引号图标，尝试直接提取结果...")
+                                        # 直接尝试提取图片
+                                        self.logger.info("🔄 使用最新图片提取方法")
+                                        urls = await self.extract_latest_generated_images()
+                                        
+                                        if urls:
+                                            self.logger.info(f"📊 直接提取到 {len(urls)} 个图片URL")
+                                            # 检查是否都是低分辨率预览图（360x360或更小）
+                                            def get_resolution(url):
+                                                import re
+                                                match = re.search(r'aigc_resize:(\d+):(\d+)', url)
+                                                if match:
+                                                    return int(match.group(1)) * int(match.group(2))
+                                                return 0
+                                            
+                                            max_res = max([get_resolution(u) for u in urls], default=0)
+                                            if max_res < 512 * 512:  # 所有图片都小于512x512
+                                                self.logger.warning(f"⚠️ 检测到的图片都是低分辨率预览图（最高分辨率: {max_res}），尝试点击预览图获取大图...")
+                                                # 尝试点击预览图获取大图
+                                                try:
+                                                    big_urls = await self.click_preview_and_get_1080_image()
+                                                    if big_urls:
+                                                        self.logger.info(f"✅ 通过点击预览图获取到 {len(big_urls)} 张大图")
+                                                        urls = big_urls
+                                                    else:
+                                                        self.logger.warning("⚠️ 点击预览图未获取到大图")
+                                                except Exception as click_e:
+                                                    self.logger.warning(f"⚠️ 点击预览图失败: {click_e}")
+                                            
+                                            # 过滤历史数据，只保留新生成的图片
+                                            new_urls = [url for url in urls if url not in (self.pre_gen_image_urls or [])]
+                                            self.logger.info(f"📊 过滤后新图片: {len(new_urls)} 个")
+                                            if new_urls:
+                                                self.logger.info("✅ 直接过滤历史数据成功")
+                                                self.image_urls = new_urls
+                                                self.generation_completed = True
+                                                try:
+                                                    in_progress = await self.check_video_in_progress()
+                                                except Exception:
+                                                    in_progress = False
+                                                if in_progress:
+                                                    vids = await self.wait_for_video_done(900, 5)
+                                                    try:
+                                                        imgs2 = await self.extract_latest_generated_images()
+                                                        if imgs2:
+                                                            new_imgs2 = [u for u in imgs2 if u not in (self.pre_gen_image_urls or [])]
+                                                            if new_imgs2:
+                                                                self.image_urls = new_imgs2
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    vids = await self.extract_latest_generated_videos()
+                                                ctype = "image" if not vids else ("mixed" if self.image_urls and vids else "video")
+                                                self.logger.info(f"✅ 直接提取成功，图片 {len(new_urls)}，视频 {len(vids)}")
+                                                return TaskResult(
+                                                    code=ErrorCode.SUCCESS.value,
+                                                    data={"images": self.image_urls, "videos": vids, "type": ctype},
+                                                    message="直接提取结果成功"
+                                                )
+                                            else:
+                                                self.logger.warning("⚠️ 直接过滤后无新图片，尝试直接提取视频")
+                                                try:
+                                                    in_progress = await self.check_video_in_progress()
+                                                except Exception:
+                                                    in_progress = False
+                                                if in_progress:
+                                                    await self.wait_for_video_done(900, 10)
+                                                    vids = await self.click_first_video_and_capture_url(0, 15000)
+                                                else:
+                                                    vids = await self.click_first_video_and_capture_url(10, 15000) or await self.extract_latest_generated_videos()
+                                                if vids:
+                                                    self.logger.info(f"✅ 仅视频生成完成，视频 {len(vids)}")
+                                                    return TaskResult(
+                                                        code=ErrorCode.SUCCESS.value,
+                                                        data={"images": [], "videos": vids, "type": "video"},
+                                                        message="仅视频结果成功"
+                                                    )
+                                        else:
+                                            self.logger.warning("⚠️ 直接提取未获取到图片，尝试直接提取视频")
+                                            try:
+                                                in_progress = await self.check_video_in_progress()
+                                            except Exception:
+                                                in_progress = False
+                                            vids = await (self.wait_for_video_done(900, 5) if in_progress else self.extract_latest_generated_videos())
+                                            posters = []
+                                            try:
+                                                posters = await self.extract_latest_video_posters()
+                                            except Exception:
+                                                posters = []
+                                            if vids:
+                                                self.logger.info(f"✅ 仅视频生成完成，视频 {len(vids)}")
+                                                return TaskResult(
+                                                    code=ErrorCode.SUCCESS.value,
+                                                    data={"images": [], "videos": vids, "posters": posters, "type": "video"},
+                                                    message="仅视频结果成功"
+                                                )
+                                except Exception as direct_e:
+                                    self.logger.debug(f"⏰ 直接检测引号图标失败: {direct_e}")
+                    except Exception as e:
+                        self.logger.debug(f"按钮状态检测失败: {e}")
+                
+                await asyncio.sleep(1)
             
-            # 兜底方法1: 直接搜索1080大图
+            # 超时后的降级方案
+            self.logger.warning(f"⚠️ API监听器超时,尝试DOM提取...")
+            
+            # 降级方案1: 从 DOM 提取
             urls = await self.extract_fullsize_images_from_dom()
             if urls:
-                self.image_urls = urls
-                self.generation_completed = True
-                return TaskResult(
-                    code=ErrorCode.SUCCESS.value,
-                    data=self.image_urls,
-                    message="兜底提取1080:1080大图成功"
-                )
+                new_urls = [url for url in urls if url not in (self.pre_gen_image_urls or [])]
+                if new_urls:
+                    self.image_urls = new_urls
+                    try:
+                        in_progress = await self.check_video_in_progress()
+                    except Exception:
+                        in_progress = False
+                    if in_progress:
+                        await self.wait_for_video_done(900, 10)
+                        vids = await self.click_first_video_and_capture_url(0, 15000)
+                        try:
+                            imgs2 = await self.extract_latest_generated_images()
+                            if imgs2:
+                                new_imgs2 = [u for u in imgs2 if u not in (self.pre_gen_image_urls or [])]
+                                if new_imgs2:
+                                    self.image_urls = new_imgs2
+                        except Exception:
+                            pass
+                    else:
+                        vids = await self.click_first_video_and_capture_url(10, 15000) or await self.extract_latest_generated_videos()
+                    posters = []
+                    try:
+                        posters = await self.extract_latest_video_posters()
+                    except Exception:
+                        posters = []
+                    ctype = "image" if not vids else ("mixed" if self.image_urls and vids else "video")
+                    try:
+                        for i, vu in enumerate(vids or [], 1):
+                            self.logger.info(f"视频{i} URL: {vu}")
+                    except Exception:
+                        pass
+                    return TaskResult(
+                        code=ErrorCode.SUCCESS.value,
+                        data={"images": self.image_urls, "videos": vids, "posters": posters, "type": ctype},
+                        message="DOM提取结果成功(降级方案)"
+                    )
             
-            # 兜底方法2: 从网络请求中获取
-            network_urls = await self.extract_1080_images_from_network()
-            if network_urls:
-                self.image_urls = network_urls
-                self.generation_completed = True
-                return TaskResult(
-                    code=ErrorCode.SUCCESS.value,
-                    data=self.image_urls,
-                    message="从网络请求中获取1080:1080大图成功"
-                )
-
             return TaskResult(
-                code=ErrorCode.TASK_ID_NOT_OBTAINED.value, 
-                data=None, 
-                message="等待超时：未检测到1080:1080大图"
+                code=ErrorCode.TASK_ID_NOT_OBTAINED.value,
+                data=None,
+                message="等待超时：未检测到生成结果"
             )
             
         except Exception as e:
@@ -2599,9 +4066,7 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 error_details={"error": "missing_prompt"}
             )
 
-        self.logger.info("开始执行文本生成图片任务", 
-                        prompt=prompt, model=model, 
-                        aspect_ratio=aspect_ratio, quality=quality, image_path=image_path)
+        self.logger.info("开始执行文本生成图片任务", prompt=prompt, image_path=image_path)
         
         try:
             # 初始化浏览器
@@ -2624,14 +4089,26 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
                 validate_result = await self.validate_login_success()
                 if validate_result.code != ErrorCode.SUCCESS.value:
                     return validate_result
+                try:
+                    await self.close_all_modals()
+                except Exception:
+                    pass
             
             # 跳转到生成页面
             nav_result = await self.navigate_to_generation_page()
             if nav_result.code != ErrorCode.SUCCESS.value:
                 return nav_result
+            try:
+                await self.close_all_modals()
+            except Exception:
+                pass
             
             # 设置响应监听器
             await self.setup_response_listener()
+            try:
+                await self.close_all_modals()
+            except Exception:
+                pass
             
             # AI Agent模式下的处理
             if self.current_tool_type == "AI Agent":
@@ -2728,6 +4205,42 @@ class JimengText2ImageExecutor(BaseTaskExecutor):
         finally:
             await self.close_browser()
 
+    async def detect_content_type(self) -> str:
+        """检测生成的内容类型：图片还是视频（解决问题4）"""
+        try:
+            result = await self.page.evaluate('''() => {
+                // 检查视频元素
+                const videos = document.querySelectorAll('video, [class*="video"]');
+                for (const v of videos) {
+                    if (v.offsetWidth > 0 && v.offsetHeight > 0) {
+                        return "video";
+                    }
+                }
+                
+                // 检查是否有视频相关的类名或属性
+                const containers = document.querySelectorAll('[class*="result"], [class*="output"], [class*="generation"]');
+                for (const container of containers) {
+                    const classes = container.className || "";
+                    if (classes.includes("video") || classes.includes("mp4")) {
+                        return "video";
+                    }
+                }
+                
+                // 默认为图片
+                return "image";
+            }''')
+            
+            # 额外检查URL中是否包含视频格式
+            if self.image_urls:
+                for url in self.image_urls:
+                    if any(ext in url.lower() for ext in ['.mp4', '.webm', '.mov', 'video']):
+                        return "video"
+            
+            return result if result in ["image", "video"] else "image"
+        except Exception as e:
+            self.logger.debug(f"检测内容类型失败: {e}")
+            return "image"  # 默认返回图片
+    
     async def run(self, **kwargs) -> TaskResult:
         """运行任务的入口方法"""
         return await self.execute(**kwargs)
